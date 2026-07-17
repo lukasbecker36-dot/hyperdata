@@ -128,6 +128,12 @@
     <div class="tblscroll"><table id="exittbl2"></table></div>
     <div class="note">Winner is a <b>signal-based exit</b>: close the fade when price closes back <b>inside the prior 24h range</b> it broke (8h time backstop). Best Sharpe (0.149), highest win rate (82%), nearly the full edge (+48bps) in <b>one-third the hold time</b> (2.7h vs 8h) → ~2.7× the capital efficiency. It's a self-adapting target: the thesis is "the breakout reverts", so once price reclaims the range the thesis is done. This also shrinks the margin book ~3× (peak ~$600 vs ~$1,700 at 8h). Pure long time-holds earn the most per trade but the least per hour — the worst efficient choice.</div>
   </section>
+
+  <section style="border-color:#1f5a2f">
+    <h2>L. Optimal time backstop <span class="tag">— range-reclaim exit; the max-hold for trades that never revert</span></h2>
+    <div class="tblscroll"><table id="bstbl"></table></div>
+    <div class="note"><b>Reclaim is fast:</b> 52% revert within 1h, 80% by 8h; only 11.8% never reclaim in 24h. Sweeping the backstop, <b class="pos">~8h is optimal</b> (max Sharpe 0.150 and max net +48.5bps); 6h nearly ties; 4h if capital-recycling matters most (net/hr 21). <b>Longer than 8h is strictly worse</b> — edge falls and the worst trade blows out (−28% at 8h → −73% at 24h). Key point: a <b>time</b> cut works where a <b>price</b> stop failed (panel H). A price stop exits on how far price moved against you — but big adverse moves are the ones that revert. A time cut exits on how long the thesis has failed — and a breakout that hasn't reclaimed its range in ~8h is a genuine trend. Time is a good classifier of "real breakout"; adverse-price-distance is a bad one.</div>
+  </section>
 </div>
 
 <script>
@@ -336,4 +342,11 @@ const ex2={head:["Exit rule","net/trade","win%","avg hold","Sharpe","net/hr (eff
 (function(){let h='<tr>'+ex2.head.map(x=>`<th>${x}</th>`).join('')+'</tr>';
  ex2.rows.forEach(r=>{const star=r[0].includes('★');h+=`<tr${star?' style="background:#0f1a12"':''}><td>${r[0]}</td><td class="cell-pos">+${r[1]}</td><td>${r[2]}</td><td class="cell-mut">${r[3]}</td><td class="${r[4]>=0.14?'cell-pos':'cell-mut'}">${r[4].toFixed(3)}</td><td class="${r[5]>=15?'cell-pos':'cell-mut'}">${r[5].toFixed(1)}</td></tr>`;});
  document.getElementById('exittbl2').innerHTML=h;})();
+
+// backstop sweep table
+const bs={head:["Backstop","net/trade","win%","avg hold","Sharpe","net/hr","worst trade"],
+ rows:[["2h",21.0,71,"1.1h",0.071,18.5,-44.7],["4h",37.1,76,"1.8h",0.127,21.0,-19.6],["6h",44.0,80,"2.3h",0.144,19.4,-23.6],["8h ★",48.5,82,"2.7h",0.150,18.1,-28.2],["12h",46.6,84,"3.4h",0.128,13.7,-35.0],["16h",42.6,86,"4.0h",0.101,10.6,-46.0],["24h",39.5,88,"5.1h",0.074,7.8,-73.0]]};
+(function(){let h='<tr>'+bs.head.map(x=>`<th>${x}</th>`).join('')+'</tr>';
+ bs.rows.forEach(r=>{const star=r[0].includes('★');h+=`<tr${star?' style="background:#0f1a12"':''}><td>${r[0]}</td><td class="cell-pos">+${r[1].toFixed(1)}</td><td>${r[2]}</td><td class="cell-mut">${r[3]}</td><td class="${r[4]>=0.145?'cell-pos':'cell-mut'}">${r[4].toFixed(3)}</td><td class="cell-mut">${r[5].toFixed(1)}</td><td class="cell-neg">${r[6].toFixed(1)}%</td></tr>`;});
+ document.getElementById('bstbl').innerHTML=h;})();
 </script>
