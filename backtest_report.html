@@ -130,6 +130,12 @@
   </section>
 
   <section style="border-color:#1f5a2f">
+    <h2>M. Which candle timeframe? <span class="tag">— same strategy, same ~18d window, all perps; detection on 5m / 15m / 1h</span></h2>
+    <div class="tblscroll"><table id="tftbl"></table></div>
+    <div class="note">The reversion the fade captures <b>shrinks as bars get finer</b> (gross move 2.95% @1h → 1.85% @15m → 1.27% @5m → 0.76% @1m). At 1m that's only <b class="neg">+0.9bps net</b> — the ~11bps cost eats it: below ~5m the reversion sinks toward the cost floor and the edge dies. 1h has the biggest per-trade edge but a coarse clock, 9× fewer signals, and worst capital efficiency. <b class="pos">15m is the robust default</b> (validated, healthy reversion cushion over costs, ~33 sig/day). <b>5m</b> posts the best in-sample stats (86% win, best Sharpe, ~2× capital efficiency) but is cost-fragile (thin margin over fees) and fires 77 sig/day — a higher-octane option that lives or dies on maker execution. Absolute bps low here because this 18d window is the recent soft regime; the ranking is the point.</div>
+  </section>
+
+  <section style="border-color:#1f5a2f">
     <h2>L. Optimal time backstop <span class="tag">— range-reclaim exit; the max-hold for trades that never revert</span></h2>
     <div class="tblscroll"><table id="bstbl"></table></div>
     <div class="note"><b>Reclaim is fast:</b> 52% revert within 1h, 80% by 8h; only 11.8% never reclaim in 24h. Sweeping the backstop, <b class="pos">~8h is optimal</b> (max Sharpe 0.150 and max net +48.5bps); 6h nearly ties; 4h if capital-recycling matters most (net/hr 21). <b>Longer than 8h is strictly worse</b> — edge falls and the worst trade blows out (−28% at 8h → −73% at 24h). Key point: a <b>time</b> cut works where a <b>price</b> stop failed (panel H). A price stop exits on how far price moved against you — but big adverse moves are the ones that revert. A time cut exits on how long the thesis has failed — and a breakout that hasn't reclaimed its range in ~8h is a genuine trend. Time is a good classifier of "real breakout"; adverse-price-distance is a bad one.</div>
@@ -349,4 +355,11 @@ const bs={head:["Backstop","net/trade","win%","avg hold","Sharpe","net/hr","wors
 (function(){let h='<tr>'+bs.head.map(x=>`<th>${x}</th>`).join('')+'</tr>';
  bs.rows.forEach(r=>{const star=r[0].includes('★');h+=`<tr${star?' style="background:#0f1a12"':''}><td>${r[0]}</td><td class="cell-pos">+${r[1].toFixed(1)}</td><td>${r[2]}</td><td class="cell-mut">${r[3]}</td><td class="${r[4]>=0.145?'cell-pos':'cell-mut'}">${r[4].toFixed(3)}</td><td class="cell-mut">${r[5].toFixed(1)}</td><td class="cell-neg">${r[6].toFixed(1)}%</td></tr>`;});
  document.getElementById('bstbl').innerHTML=h;})();
+
+// timeframe comparison table
+const tf={head:["Timeframe","sig/day","net/trade","win%","avg hold","gross move","Sharpe","net/hr"],
+ rows:[["5m",77.6,16.0,86.3,"1.7h","1.27%",0.068,9.6],["15m ★",33.1,15.9,79.4,"2.8h","1.85%",0.052,5.7],["1h",8.8,27.5,67.1,"5.1h","2.95%",0.065,5.4]]};
+(function(){let h='<tr>'+tf.head.map(x=>`<th>${x}</th>`).join('')+'</tr>';
+ tf.rows.forEach(r=>{const star=r[0].includes('★');h+=`<tr${star?' style="background:#0f1a12"':''}><td>${r[0]}</td><td class="cell-mut">${r[1]}</td><td class="cell-pos">+${r[2].toFixed(1)}</td><td>${r[3]}</td><td class="cell-mut">${r[4]}</td><td class="cell-mut">${r[5]}</td><td>${r[6].toFixed(3)}</td><td class="cell-mut">${r[7].toFixed(1)}</td></tr>`;});
+ document.getElementById('tftbl').innerHTML=h;})();
 </script>
