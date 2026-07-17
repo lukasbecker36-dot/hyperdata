@@ -122,6 +122,12 @@
     <div class="tblscroll" style="margin-top:14px"><table id="wftbl"></table></div>
     <div class="note">The frozen strategy generalized to unseen windows: pooled OOS <b class="pos">+32bps/trade, t=2.43, 6 of 8 folds positive</b>, and it did <b>not degrade</b> vs in-sample (~+25bps). Tellingly, <b>over-optimizing made it worse</b> — grid-searching the best parameters per window gave a noisier OOS (t=1.45), meaning the edge lives in the robust structure, not tuned knobs. Caveats: still only 8 folds within the same 8-month era (temporal OOS, not post-design data); a real ~1-month drawdown exists (folds 5–6, mid-May→mid-June). This de-risks overfitting but doesn't replace a live forward test.</div>
   </section>
+
+  <section style="border-color:#1f5a2f">
+    <h2>K. Exit strategy — time vs target vs signal-based <span class="tag">— stacked filter, 15m; no stop (stops kill it, panel H)</span></h2>
+    <div class="tblscroll"><table id="exittbl2"></table></div>
+    <div class="note">Winner is a <b>signal-based exit</b>: close the fade when price closes back <b>inside the prior 24h range</b> it broke (8h time backstop). Best Sharpe (0.149), highest win rate (82%), nearly the full edge (+48bps) in <b>one-third the hold time</b> (2.7h vs 8h) → ~2.7× the capital efficiency. It's a self-adapting target: the thesis is "the breakout reverts", so once price reclaims the range the thesis is done. This also shrinks the margin book ~3× (peak ~$600 vs ~$1,700 at 8h). Pure long time-holds earn the most per trade but the least per hour — the worst efficient choice.</div>
+  </section>
 </div>
 
 <script>
@@ -319,4 +325,15 @@ const wft={head:["Mode","OOS n","net/trade","win%","t-stat","folds +"],
 (function(){let h='<tr>'+wft.head.map(x=>`<th>${x}</th>`).join('')+'</tr>';
  wft.rows.forEach(r=>{const star=r[0].includes('★');h+=`<tr${star?' style="background:#0f1a12"':''}><td>${r[0]}</td><td class="cell-mut">${r[1]}</td><td class="cell-pos">${r[2]}</td><td>${r[3]}</td><td class="${parseFloat(r[4])>=2?'cell-pos':'cell-mut'}">${r[4]}</td><td class="cell-mut">${r[5]}</td></tr>`;});
  document.getElementById('wftbl').innerHTML=h;})();
+
+// exit-strategy comparison table
+const ex2={head:["Exit rule","net/trade","win%","avg hold","Sharpe","net/hr (eff.)"],
+ rows:[["Time: 8h hold",53,57,"8.0h",0.100,6.6],
+       ["Time: 6h hold",50,59,"6.0h",0.105,8.3],
+       ["Profit target 2%",40,75,"3.7h",0.132,10.7],
+       ["Profit target 3%",49,67,"5.2h",0.129,9.4],
+       ["Range-reclaim (8h backstop) ★",48,82,"2.7h",0.149,17.9]]};
+(function(){let h='<tr>'+ex2.head.map(x=>`<th>${x}</th>`).join('')+'</tr>';
+ ex2.rows.forEach(r=>{const star=r[0].includes('★');h+=`<tr${star?' style="background:#0f1a12"':''}><td>${r[0]}</td><td class="cell-pos">+${r[1]}</td><td>${r[2]}</td><td class="cell-mut">${r[3]}</td><td class="${r[4]>=0.14?'cell-pos':'cell-mut'}">${r[4].toFixed(3)}</td><td class="${r[5]>=15?'cell-pos':'cell-mut'}">${r[5].toFixed(1)}</td></tr>`;});
+ document.getElementById('exittbl2').innerHTML=h;})();
 </script>
