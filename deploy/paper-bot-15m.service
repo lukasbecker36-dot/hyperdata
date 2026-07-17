@@ -1,0 +1,17 @@
+[Unit]
+Description=Hyperliquid fade paper bot (15m)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+ExecStart=/usr/bin/python3 /opt/hyperdata/paper_bot.py --interval 15m --datadir /opt/hyperdata/paper_15m
+Restart=always
+RestartSec=15
+StandardOutput=append:/opt/hyperdata/paper_15m/service.out
+StandardError=append:/opt/hyperdata/paper_15m/service.err
+
+[Install]
+WantedBy=multi-user.target

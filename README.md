@@ -37,3 +37,6 @@ Interactive report: see `backtest_report.html`.
 ## Caveats
 In-sample only; signals are time-clustered/correlated; edge concentrates in MID-liquidity names;
 regime-filter thresholds use full-sample quantiles (mild lookahead). Not investment advice.
+
+## Live paper bot
+See `deploy/DEPLOY.md`. Run `paper_bot.py --interval 5m` and `--interval 15m` as two processes (systemd units in `deploy/`). Stdlib-only, self-calibrating, logs P&L inclusive of maker fees.
