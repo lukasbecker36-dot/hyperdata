@@ -25,6 +25,11 @@ import argparse, json, os, sys, time, math, csv
 from datetime import datetime, timezone
 import urllib.request
 
+try:
+    import telegram_notify as tg
+except Exception:      # module missing / import error must never break trading
+    tg = None
+
 API = "https://api.hyperliquid.xyz/info"
 
 # ---- strategy constants (match the backtest) ----
@@ -83,6 +88,7 @@ class Bot:
         self.n_win = 0
         self.universe = {}      # symbol -> tier
         self.rv_thr = RV_FALLBACK[interval]
+        self._last_summary_day = None   # UTC date of last daily-summary push
         self._load_state()
         if not os.path.exists(self.trade_csv):
             with open(self.trade_csv, "w", newline="") as f:
@@ -97,6 +103,32 @@ class Bot:
         print(line, flush=True)
         with open(self.log_file, "a") as f:
             f.write(line + "\n")
+
+    def notify(self, msg):
+        """Best-effort Telegram push, tagged with this bot's interval. Never raises."""
+        if tg is None or not tg.enabled():
+            return
+        try:
+            tg.send(f"<b>[{self.interval}]</b> {msg}")
+        except Exception:
+            pass
+
+    def _winrate(self):
+        return self.n_win / self.n_closed * 100 if self.n_closed else 0.0
+
+    def _maybe_daily_summary(self):
+        """Once per UTC day, push a P&L snapshot."""
+        today = datetime.now(timezone.utc).date()
+        if self._last_summary_day == today:
+            return
+        # skip the very first cycle after (re)start so we don't double-fire on boot
+        if self._last_summary_day is not None:
+            self.notify(
+                f"\U0001F4C8 daily summary\n"
+                f"cum P&amp;L: ${self.cum_pnl:+.2f}\n"
+                f"closed: {self.n_closed}  win: {self._winrate():.0f}%\n"
+                f"open positions: {len(self.positions)}")
+        self._last_summary_day = today
 
     def _save_state(self):
         with open(self.state_file, "w") as f:
@@ -222,6 +254,8 @@ class Bot:
                                "entry_bid": bid, "entry_ask": ask}
         self.log(f"OPEN  {sym:12s} {'SHORT' if d<0 else 'LONG ':5s} @ {entry:.6g}  "
                  f"(vr={feat['vratio']:.1f}x rv={feat['rv']:.4f})  open={len(self.positions)}")
+        self.notify(f"\U0001F7E2 OPEN {'SHORT' if d<0 else 'LONG'} <b>{sym}</b> @ {entry:.6g}\n"
+                    f"vr={feat['vratio']:.1f}x  rv={feat['rv']:.4f}  open={len(self.positions)}")
         self._save_state()
 
     def close_pos(self, sym, reason):
@@ -244,6 +278,10 @@ class Bot:
                 p["entry_bid"], p["entry_ask"], bid, ask, f"{self.cum_pnl:.4f}"])
         self.log(f"CLOSE {sym:12s} {reason:8s} net={net*1e4:+6.1f}bps pnl=${pnl:+.3f}  "
                  f"cum=${self.cum_pnl:+.2f} trades={self.n_closed} win={self.n_win/max(1,self.n_closed)*100:.0f}%")
+        emoji = "\U0001F534" if net <= 0 else "\U0001F535"
+        self.notify(f"{emoji} CLOSE <b>{sym}</b> ({reason})\n"
+                    f"net={net*1e4:+.1f}bps  pnl=${pnl:+.3f}  hold={hold_h:.1f}h\n"
+                    f"cum=${self.cum_pnl:+.2f}  trades={self.n_closed}  win={self._winrate():.0f}%")
         del self.positions[sym]
         self._save_state()
 
@@ -285,10 +323,14 @@ class Bot:
             except Exception as e: self.log(f"WARN open {sym}: {e}")
         self.log(f"cycle done: {n_sig} new signals, {len(self.positions)} open, "
                  f"cum=${self.cum_pnl:+.2f}, {self.n_closed} closed")
+        self._maybe_daily_summary()
 
     def run(self):
         self.log(f"=== paper bot [{self.interval}] starting | notional=${NOTIONAL} maker_fee={MAKER_FEE*1e4}bps "
                  f"backstop={BACKSTOP_HRS}h maxpos={MAX_POSITIONS} ===")
+        self.notify(f"\U0001F916 paper bot started\n"
+                    f"notional=${NOTIONAL}  backstop={BACKSTOP_HRS}h  maxpos={MAX_POSITIONS}\n"
+                    f"resuming: cum=${self.cum_pnl:+.2f}  open={len(self.positions)}  closed={self.n_closed}")
         self.load_universe()
         self.calibrate()
         while True:
@@ -301,6 +343,7 @@ class Bot:
                 self.cycle()
             except Exception as e:
                 self.log(f"ERROR cycle: {e}")
+                self.notify(f"⚠️ cycle error: {e}")
             # refresh universe/tiers once a day
             if int(time.time()) % 86400 < self.bar_min * 60:
                 try: self.load_universe()

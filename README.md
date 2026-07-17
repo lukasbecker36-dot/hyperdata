@@ -40,3 +40,5 @@ regime-filter thresholds use full-sample quantiles (mild lookahead). Not investm
 
 ## Live paper bot
 See `deploy/DEPLOY.md`. Run `paper_bot.py --interval 5m` and `--interval 15m` as two processes (systemd units in `deploy/`). Stdlib-only, self-calibrating, logs P&L inclusive of maker fees.
+
+**Telegram monitoring** (optional, still stdlib-only): set `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` and the bots push start/OPEN/CLOSE/daily-summary/error alerts. `telegram_monitor.py` (its own systemd unit) answers `/status`, `/pnl`, `/positions`, `/trades`. Setup walkthrough in `deploy/DEPLOY.md` §5.

@@ -1,0 +1,19 @@
+[Unit]
+Description=Hyperliquid paper bot — Telegram monitor (interactive commands)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+EnvironmentFile=/etc/hyperdata/telegram.env
+Environment=BOT_DATADIRS=5m:/opt/hyperdata/paper_5m,15m:/opt/hyperdata/paper_15m
+ExecStart=/usr/bin/python3 /opt/hyperdata/telegram_monitor.py
+Restart=always
+RestartSec=15
+StandardOutput=append:/opt/hyperdata/telegram_monitor.out
+StandardError=append:/opt/hyperdata/telegram_monitor.err
+
+[Install]
+WantedBy=multi-user.target
