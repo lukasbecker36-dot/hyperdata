@@ -114,6 +114,14 @@
     <div class="tblscroll"><table id="rangew"></table></div>
     <div class="note">Range-tightness test: signed by breakout direction, momentum is <b class="neg">negative in every bucket</b> — breakouts <i>revert</i>, they don't continue. The "dead coin springs to life and runs" idea is rejected: even tight-range + coiled ("dead") breakouts snap back (momentum −34bps, 42% win at 4h). Range width is useful only in reverse — <b>wide/volatile</b> prior ranges fade hardest (~+52bps), tight ones barely (~+3bps), which just re-derives the volatility filter through a price lens.</div>
   </section>
+
+  <section style="border-color:#1f5a2f">
+    <h2>J. Walk-forward — the overfitting test <span class="tag">— 1h data, 8 rolling folds (60d train → 20d test), vol threshold learned from train only, no lookahead</span></h2>
+    <div class="chartwrap"><svg id="wf" viewBox="0 0 960 270" preserveAspectRatio="none"></svg></div>
+    <div class="legend"><span><b style="color:#3a5a8c">▉</b> train edge (in-sample)</span><span><b style="color:#3fb950">▉</b> test edge (out-of-sample)</span></div>
+    <div class="tblscroll" style="margin-top:14px"><table id="wftbl"></table></div>
+    <div class="note">The frozen strategy generalized to unseen windows: pooled OOS <b class="pos">+32bps/trade, t=2.43, 6 of 8 folds positive</b>, and it did <b>not degrade</b> vs in-sample (~+25bps). Tellingly, <b>over-optimizing made it worse</b> — grid-searching the best parameters per window gave a noisier OOS (t=1.45), meaning the edge lives in the robust structure, not tuned knobs. Caveats: still only 8 folds within the same 8-month era (temporal OOS, not post-design data); a real ~1-month drawdown exists (folds 5–6, mid-May→mid-June). This de-risks overfitting but doesn't replace a live forward test.</div>
+  </section>
 </div>
 
 <script>
@@ -284,4 +292,31 @@ const rw={head:["Prior 24h range","n","momentum net @4h","mom win%","→ implied
 (function(){let h='<tr>'+rw.head.map(x=>`<th>${x}</th>`).join('')+'</tr>';
  rw.rows.forEach(r=>{h+=`<tr><td>${r[0]}</td><td class="cell-mut">${r[1]}</td>${bpsCell(r[2])}<td>${r[3].toFixed(1)}</td>${bpsCell(r[4])}</tr>`;});
  document.getElementById('rangew').innerHTML=h;})();
+
+// walk-forward: per-fold train vs test (fixed spec), grouped bars
+const wf=[["Feb20",28.0,68.6],["Mar12",51.8,140.7],["Apr01",50.5,72.1],["Apr21",58.9,7.1],["May11",22.3,-7.6],["May31",23.1,-31.2],["Jun20",-5.7,89.9],["Jul10",37.0,78.0]];
+(function(){
+  const W=960,H=270,pL=44,pR=16,pT=18,pB=30,n=wf.length;
+  const vals=wf.flatMap(f=>[f[1],f[2]]); const lo=Math.min(...vals,0)-8,hi=Math.max(...vals)+10;
+  const y=v=>pT+(H-pT-pB)*(1-(v-lo)/(hi-lo)); const gw=(W-pL-pR)/n;
+  let el='';
+  for(let g=-40;g<=140;g+=40){const yy=y(g);el+=`<line x1="${pL}" y1="${yy}" x2="${W-pR}" y2="${yy}" stroke="${g===0?'#3a4656':'#232c38'}"/><text x="${pL-8}" y="${yy+3}" fill="#8b98a9" font-size="10" text-anchor="end">${g}</text>`;}
+  wf.forEach((f,i)=>{
+    const cx=pL+i*gw, bw=gw*0.34, y0=y(0);
+    const x1=cx+gw*0.12, x2=cx+gw*0.5;
+    [[x1,f[1],'#3a5a8c'],[x2,f[2],f[2]>=0?'#3fb950':'#f85149']].forEach(([x,v,col])=>{
+      el+=`<rect x="${x}" y="${Math.min(y(v),y0)}" width="${bw}" height="${Math.abs(y(v)-y0)}" fill="${col}" rx="2"/>`;
+    });
+    el+=`<text x="${cx+gw*0.5}" y="${H-8}" fill="#8b98a9" font-size="9" text-anchor="middle">${f[0]}</text>`;
+  });
+  document.getElementById('wf').innerHTML=el;
+})();
+
+// walk-forward summary table
+const wft={head:["Mode","OOS n","net/trade","win%","t-stat","folds +"],
+ rows:[["Fixed spec (thr from train) ★","1564","+32.0","55.9","+2.43","6 / 8"],
+       ["Adaptive (grid-searched)","855","+28.5","54.6","+1.45","5 / 8"]]};
+(function(){let h='<tr>'+wft.head.map(x=>`<th>${x}</th>`).join('')+'</tr>';
+ wft.rows.forEach(r=>{const star=r[0].includes('★');h+=`<tr${star?' style="background:#0f1a12"':''}><td>${r[0]}</td><td class="cell-mut">${r[1]}</td><td class="cell-pos">${r[2]}</td><td>${r[3]}</td><td class="${parseFloat(r[4])>=2?'cell-pos':'cell-mut'}">${r[4]}</td><td class="cell-mut">${r[5]}</td></tr>`;});
+ document.getElementById('wftbl').innerHTML=h;})();
 </script>
