@@ -106,6 +106,14 @@
     </div>
     <div class="note" style="margin-top:12px">Note the deeper, longer drawdowns than the 52-day 15m curve (panel C) showed — this 8-month view includes the −16% dip in April. Vol-scaled sizing did <i>not</i> improve this (Sharpe 3.4 vs 3.8): the edge scales with volatility, so shrinking volatile positions removes edge as fast as risk.</div>
   </section>
+
+  <section style="border-color:#1f5a2f">
+    <h2>I. Confirmation on 15m + range-tightness test <span class="tag">— finer granularity; is the coiled-spring / "dead coin" breakout a momentum trade?</span></h2>
+    <div class="tblscroll"><table id="confirm15"></table></div>
+    <div class="note" style="margin:10px 0 20px">The stacked fade filter <b class="pos">confirms at 15m — stronger, if anything</b> (+38.5bps at 4h, +53.5bps at 8h, t≈5). Both halves of the 52 days positive. Not a 1h-granularity artifact.</div>
+    <div class="tblscroll"><table id="rangew"></table></div>
+    <div class="note">Range-tightness test: signed by breakout direction, momentum is <b class="neg">negative in every bucket</b> — breakouts <i>revert</i>, they don't continue. The "dead coin springs to life and runs" idea is rejected: even tight-range + coiled ("dead") breakouts snap back (momentum −34bps, 42% win at 4h). Range width is useful only in reverse — <b>wide/volatile</b> prior ranges fade hardest (~+52bps), tight ones barely (~+3bps), which just re-derives the volatility filter through a price lens.</div>
+  </section>
 </div>
 
 <script>
@@ -262,4 +270,18 @@ const seqticks=[[10,"Jan"],[41,"Feb"],[69,"Mar"],[100,"Apr"],[130,"May"],[161,"J
   seqticks.forEach(([i,l])=>{el+=`<text x="${x(i)}" y="${H-8}" fill="#8b98a9" font-size="10" text-anchor="middle">${l}</text>`;});
   document.getElementById('stackeq').innerHTML=el;
 })();
+
+// 15m confirmation table
+const c15={head:["Hold","raw HIGH+MID net","t","stacked filter net","t"],
+ rows:[["1h",4.5,7.4,3.4,2.1],["2h",12.2,8.6,17.7,3.2],["4h",24.9,11.0,38.5,4.7],["8h",22.4,8.1,53.5,5.1]]};
+(function(){let h='<tr>'+c15.head.map(x=>`<th>${x}</th>`).join('')+'</tr>';
+ c15.rows.forEach(r=>{h+=`<tr><td>${r[0]}</td>${bpsCell(r[1])}<td class="cell-pos">${r[2].toFixed(1)}</td>${bpsCell(r[3])}<td class="cell-pos">${r[4].toFixed(1)}</td></tr>`;});
+ document.getElementById('confirm15').innerHTML=h;})();
+
+// range-width momentum / fade table
+const rw={head:["Prior 24h range","n","momentum net @4h","mom win%","→ implied fade net"],
+ rows:[["TIGHT / dead",2877,-25.3,42.2,3.3],["MID",2888,-40.8,39.5,18.8],["WIDE / volatile",2899,-74.3,39.0,52.3]]};
+(function(){let h='<tr>'+rw.head.map(x=>`<th>${x}</th>`).join('')+'</tr>';
+ rw.rows.forEach(r=>{h+=`<tr><td>${r[0]}</td><td class="cell-mut">${r[1]}</td>${bpsCell(r[2])}<td>${r[3].toFixed(1)}</td>${bpsCell(r[4])}</tr>`;});
+ document.getElementById('rangew').innerHTML=h;})();
 </script>
