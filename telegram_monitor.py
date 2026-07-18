@@ -11,22 +11,32 @@ Commands:
   /pnl         same as /status (P&L focus)
   /positions   list of currently-open positions per timeframe
   /trades      last few closed trades per timeframe
+  /update      git pull + restart the bots (needs the sudoers rule, see DEPLOY §5)
   /help        this list
 
 Config (env):
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (shared with the bot)
   BOT_DATADIRS   comma-separated "interval:dir" pairs
                  default: "5m:./paper_5m,15m:./paper_15m"
+  REPO_DIR       git repo to pull for /update      (default: /opt/hyperdata)
+  RESTART_UNITS  space-separated systemd bot units (default: "paper-bot-5m paper-bot-15m")
+  SYSTEMCTL      path to systemctl                 (default: /usr/bin/systemctl)
 
 Only messages from TELEGRAM_CHAT_ID are answered.
 """
 import csv
 import json
 import os
+import subprocess
 import time
 from datetime import datetime, timezone
 
 import telegram_notify as tg
+
+REPO_DIR = os.environ.get("REPO_DIR", "/opt/hyperdata")
+RESTART_UNITS = os.environ.get("RESTART_UNITS", "paper-bot-5m paper-bot-15m").split()
+SYSTEMCTL = os.environ.get("SYSTEMCTL", "/usr/bin/systemctl")
+SELF_UNIT = os.environ.get("SELF_UNIT", "telegram-monitor")
 
 
 def _datadirs():
@@ -110,12 +120,55 @@ def cmd_trades():
     return "\n".join(out) or "no bots configured"
 
 
+def _run(cmd, cwd=None, timeout=120):
+    """Run a command, return (ok, combined_output). Never raises."""
+    try:
+        p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        out = (p.stdout + p.stderr).strip()
+        return p.returncode == 0, out
+    except Exception as e:
+        return False, str(e)
+
+
+def cmd_update():
+    """git pull + restart the bot units. Restarts the monitor last (detached)
+    only if the pull actually changed anything."""
+    tg.send("\U0001F504 updating: pulling latest ...")
+    ok, out = _run(["git", "pull", "--ff-only"], cwd=REPO_DIR)
+    tail = "\n".join(out.splitlines()[-6:]) or "(no output)"
+    if not ok:
+        return f"❌ git pull failed:\n<pre>{tail}</pre>"
+    changed = "Already up to date" not in out and "Already up-to-date" not in out
+
+    results = []
+    for unit in RESTART_UNITS:
+        rok, rout = _run(["sudo", "-n", SYSTEMCTL, "restart", unit])
+        results.append(f"  {'✅' if rok else '❌'} {unit}"
+                       + ("" if rok else f": {rout.splitlines()[-1] if rout else '?'}"))
+    body = (f"\U0001F4E5 <b>update</b> — {'changes pulled' if changed else 'already current'}\n"
+            f"<pre>{tail}</pre>\n"
+            "restarted:\n" + "\n".join(results))
+
+    # If code changed, refresh the monitor too — detached, so this reply still sends.
+    if changed:
+        body += f"\n♻ restarting {SELF_UNIT} (you'll get a fresh 'monitor online')"
+        tg.send(body)
+        try:
+            subprocess.Popen(["sudo", "-n", SYSTEMCTL, "restart", SELF_UNIT],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        return None      # already sent
+    return body
+
+
 HELP = (
     "<b>Hyperliquid paper bot monitor</b>\n"
     "/status — P&amp;L + win rate + open count\n"
     "/pnl — same as /status\n"
     "/positions — currently open positions\n"
     "/trades — last few closed trades\n"
+    "/update — git pull + restart the bots\n"
     "/help — this message")
 
 HANDLERS = {
@@ -124,9 +177,19 @@ HANDLERS = {
     "/positions": cmd_positions,
     "/pos": cmd_positions,
     "/trades": cmd_trades,
+    "/update": cmd_update,
     "/help": lambda: HELP,
     "/start": lambda: HELP,
 }
+
+# command menu (autocomplete popup); order shown in the client
+MENU = [
+    ("status", "P&L, win rate, open count"),
+    ("positions", "currently open positions"),
+    ("trades", "last few closed trades"),
+    ("update", "git pull + restart the bots"),
+    ("help", "list commands"),
+]
 
 
 def main():
@@ -134,6 +197,7 @@ def main():
         raise SystemExit("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID first.")
     allowed = str(tg.CHAT_ID)
     print(f"monitor up | watching {[d for _, d in _datadirs()]} | chat={allowed}", flush=True)
+    tg.set_commands(MENU)      # register the autocomplete menu
     tg.send("\U0001F4F1 monitor online — send /help")
     offset = None
     while True:
@@ -154,7 +218,9 @@ def main():
             handler = HANDLERS.get(cmd)
             if handler:
                 try:
-                    tg.send(handler())
+                    reply = handler()
+                    if reply is not None:      # None = handler already sent its own message(s)
+                        tg.send(reply)
                 except Exception as e:
                     tg.send(f"error: {e}")
             elif text.startswith("/"):

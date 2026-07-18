@@ -107,7 +107,47 @@ systemctl status telegram-monitor
 You should get a "🤖 paper bot started" push from each bot and a "📱 monitor online" push.
 Now send `/help` to your bot in Telegram.
 
-### 5.4 Notes
+### 5.4 Command menu + remote `/update`
+
+On startup the monitor registers an **autocomplete menu** with Telegram (`setMyCommands`), so
+typing `/` in the chat shows the command list with descriptions. Nothing to configure — it just
+appears (may take a few seconds / a chat reopen to show the first time).
+
+`/update` lets you **pull the latest code and restart the bots from your phone** — no SSH needed.
+It runs `git pull --ff-only` in the repo, restarts the bot units, and (only if code actually
+changed) restarts the monitor itself so its own code refreshes.
+
+Restarting systemd units requires root, but the monitor runs as the unprivileged `hyper` user.
+Grant it a **narrow, command-specific** sudo rule (this does NOT give `hyper` general root):
+
+```bash
+# as root — confirm the systemctl path first:
+which systemctl                      # usually /usr/bin/systemctl
+
+cat > /etc/sudoers.d/hyper-botctl <<'EOF'
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart paper-bot-5m
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart paper-bot-15m
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart telegram-monitor
+EOF
+chmod 440 /etc/sudoers.d/hyper-botctl
+visudo -c                            # validate syntax (must say "parsed OK")
+```
+
+If your `systemctl` is at a different path (check `which systemctl`), edit the paths above and set
+`Environment=SYSTEMCTL=/that/path` in `telegram-monitor.service`. The repo path and unit list are
+also overridable there via `REPO_DIR` and `RESTART_UNITS` (defaults: `/opt/hyperdata` and
+`paper-bot-5m paper-bot-15m`).
+
+The repo is owned by `hyper`, so `git pull` needs no sudo — but if a previous pull ran as **root**,
+some files are root-owned and the pull will fail with a permission or "dubious ownership" error. Fix
+once with: `chown -R hyper:hyper /opt/hyperdata`.
+
+> **Security note:** anyone who can post to `TELEGRAM_CHAT_ID` can trigger `/update`, which pulls from
+> your GitHub remote and restarts services. The monitor already ignores every other chat, but treat
+> access to that Telegram chat/account as equivalent to deploy access. If that's not acceptable, drop
+> the `telegram-monitor` restart line from sudoers and remove `/update` from `HANDLERS`.
+
+### 5.5 Notes
 
 - **One token, one poller.** Only the monitor calls `getUpdates`; the bots only *send*. Don't run a
   second `getUpdates` consumer against the same token (Telegram returns 409 conflict).

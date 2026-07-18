@@ -54,6 +54,19 @@ def send(text, chat_id=None):
     return bool(res.get("ok"))
 
 
+def set_commands(commands):
+    """Register the command menu (autocomplete popup) with Telegram.
+
+    `commands` is a list of (command, description) tuples; command has no
+    leading slash. Returns True on success. Never raises.
+    """
+    if not TOKEN:
+        return False
+    payload = [{"command": c.lstrip("/"), "description": d} for c, d in commands]
+    res = _call("setMyCommands", {"commands": json.dumps(payload)})
+    return bool(res.get("ok"))
+
+
 def get_updates(offset=None, timeout=25):
     """Long-poll for incoming messages (used by the monitor). Never raises."""
     if not TOKEN:
