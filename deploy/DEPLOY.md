@@ -68,6 +68,11 @@ done
 ## Notes / knobs (top of `paper_bot.py`)
 
 - `MAKER_FEE`, `NOTIONAL`, `MAX_POSITIONS`, `BACKSTOP_HRS`, `VOL_MULT` are constants at the top.
+- **Isolated-margin leverage** (`LEVERAGE`, default 3×; `MAINT_MARGIN`, default 5%; or `--leverage`/`--maint-margin`):
+  models a forced `liquidation` exit when a position's intrabar adverse move since entry crosses
+  `1/LEVERAGE − MAINT_MARGIN` (e.g. 3× → ~28.3%). Set `--leverage 0` to disable. At 3× only ~0.7% of
+  trades liquidate, so paper P&L is nearly unchanged; higher leverage liquidates more (and, per
+  `PAPER_TRADING_ANALYSIS.md`, re-creates the stop that kills the edge). Use **isolated**, not cross.
 - State (`state_*.json`) persists open positions + cumulative P&L, so a restart resumes cleanly.
 - **Fill realism:** the bot assumes maker fills at the touch. This is optimistic — it does not model
   queue position or whether a real trade printed through. The next upgrade is a shadow-fill mode that
