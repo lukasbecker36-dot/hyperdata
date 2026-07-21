@@ -59,6 +59,34 @@ Vol-scaled sizing · correlation/same-direction concurrency cap · ATR (3–5× 
 stop. Adopt only on OOS-deflated improvement. Prior: first two likely fail on dollar/DD; the
 ATR-scaled stop gets a real shot (places the stop wider on the high-vol names where the tail lives).
 
+### Phase 1 — RESULT (causal series, 2,330 trades, 45d holdout)
+
+Baseline: annualized Sharpe **+3.67**, holdout **+4.31**, total +$704, maxDD −$300, worst −$38,
+return/|DD| **2.35**.
+
+| Lever | Sharpe | holdout | total | maxDD | worst trade | return/\|DD\| | Verdict |
+|---|---|---|---|---|---|---|---|
+| **baseline** | +3.67 | +4.31 | +$704 | −$300 | −$38 | 2.35 | — |
+| Vol-scaled sizing (1/rv, 4×) | +3.13 | +3.19 | +$403 | −$302 | −$25 | 1.34 | **reject** — halves return, worse Sharpe & r/DD; only shrinks the worst *single* trade |
+| Same-dir cap 8 (shorts) | +3.17 | +4.07 | +$579 | −$274 | −$38 | 2.11 | **reject** — best of the caps, but trades Sharpe for a modest DD cut; flat sizing does it better |
+| Same-dir cap ≤5 / BOTH | +0.8→+2.7 | −0.1→+2.8 | worse | — | −$38 | <2.1 | **reject** — degrades sharply, holdout even goes negative |
+| ATR stop 5×ATR | +1.65 | +2.38 | **−$208** | **−$596** | −$29 | −0.35 | **reject** — destroys return *and deepens* maxDD |
+| ATR stop 3–4×ATR | +1.4→1.6 | +1.3→2.8 | −$580→−$341 | −$786→−$700 | −$17→−$23 | negative | **reject** — same failure, worse |
+
+**Verdict: reject all three.** None improves OOS risk-adjusted return.
+- **Vol-scaling** shrinks the worst single trade (−$38→−$25) but halves return and cuts Sharpe/r-DD
+  — it down-weights the high-vol names that carry the edge, and doesn't reduce maxDD.
+- **Concurrency caps** only reduce maxDD modestly (cap-8 shorts: −300→−274) at a Sharpe cost;
+  tighter caps and two-sided caps collapse. Flat-notional scaling achieves DD reduction more
+  efficiently (linear, Sharpe-preserving).
+- **The ATR stop is the sharpest rejection**: at *every* k it not only kills return but **deepens**
+  the drawdown, because it converts reverting overshoots into locked losses that bleed the equity
+  curve — worse than one occasional tail loss. ATR-scaling does not rescue the stop; the stop
+  mechanism itself sells the overshoot bottom regardless of how it's scaled.
+
+Confirms `PAPER_TRADING_ANALYSIS.md` under the honest harness: **the only risk control that survives
+is flat-notional sizing** — pick the notional for your drawdown budget; don't filter the tail.
+
 ## Phase 2 — Highest-value parameter changes (walk-forward, OOS-deflated only)
 
 | # | Experiment | Rationale | Feasible now |
