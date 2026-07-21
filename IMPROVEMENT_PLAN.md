@@ -98,6 +98,46 @@ is flat-notional sizing** — pick the notional for your drawdown budget; don't 
 | 5 | RV cutoff sweep {50/60/70/80th}, trailing | Nagel: reversal pays most in high vol | yes |
 | 6 | Liquidity-quintile monotonicity, exclude top bucket | Hardens the MID-tier edge | yes |
 
+### Phase 2 — RESULT (causal series, baseline holdout Sharpe +4.31, r/DD 2.35)
+
+| Lever | best config | Sharpe | holdout | total | maxDD | r/DD | Verdict |
+|---|---|---|---|---|---|---|---|
+| **E) Liquidity** | **MID tier only** | +4.64 | **+6.59** | +$601 | −$147 | **4.10** | **ADOPT** |
+| B) RV cutoff | 70th pct | +4.22 | +3.52 | +$706 | −$235 | 3.00 | consider (risk-eff) |
+| D) Volume mult | 4× ≈ 5× | +4.64 | +4.28 | +$854 | −$319 | 2.68 | keep 5× (4×≈5× OOS) |
+| C) Hold | 8h | +3.67 | +4.31 | +$704 | −$300 | 2.35 | keep 8h |
+| **A) Funding extremity** | \|z\|≥1.5 | −0.97 | **−2.25** | +$112 | −$92 | 1.22 | **REJECT** |
+
+**A) Funding-extremity gate — REJECTED (the report's headline, and a real surprise).** Tightening
+from sign-match to \|funding z\| ≥ 1 / 1.5 / 2 drives the **holdout Sharpe negative** (+4.31 →
+−0.06 → −2.25 → −2.31). Per-trade bps rise (+61 at z≥2) but OOS collapses. The mechanism is exactly
+our Jul 19–20 blowup: **extreme funding means the crowded trend still has fuel, so the fade gets run
+over** — conditioning on extremity concentrates into the continuation regime that kills the strategy.
+The report's own caveat ("funding can stay extreme through strong trends; fading too early loses")
+is what the data shows. Keep the sign-match; do **not** add extremity.
+
+**E) Liquidity concentration — ADOPT (the strongest, most theory-consistent result).** The HIGH tier
+is nearly worthless OOS (holdout **+0.62**, r/DD 0.31); the MID tier is excellent (holdout **+6.59**,
+r/DD **4.10**). By notional-volume quintile the edge is monotone: lowest-liquidity eligible names
+earn +79 bps/trade (r/DD 4.38) while the top quintile is **dead** (+0.1 bps, r/DD 0.00). This matches
+Liu–Tsyvinski–Wu (big coins show momentum, not reversal) exactly. **Drop the HIGH tier — trade MID
+only.** It roughly halves trade count while raising OOS Sharpe and cutting maxDD by half.
+
+**B) RV cutoff — promising for risk efficiency.** 70th pct keeps the same total return ($706 vs $704)
+with maxDD cut 22% (−300 → −235), r/DD 2.35 → 3.00 — but holdout Sharpe dips (+4.31 → +3.52). A
+risk-efficiency gain (Nagel's "push the vol cutoff harder"), worth validating on more holdout.
+
+**C) Hold / OU — keep 8h.** 8h is the r/DD optimum. Shorter holds (4–6h) give higher *holdout Sharpe*
+(+5.5–5.9) but poor r/DD (0.5–0.8); longer holds add total return but worse Sharpe/DD. Note: the
+pooled **OU half-life came out ~27h**, which would (per the report's "1–2× half-life" rule) argue for
+much longer holds — but that's misleading here (the fat continuation tail inflates the reversion-time
+estimate), and the risk-adjusted optimum is clearly ~8h. A case where the OU heuristic would mislead.
+
+**Phase 2 output config to forward-test: MID-tier-only** (the one robust win), optionally with the
+70th-pct RV cutoff for extra risk efficiency. Both are independently theory-supported, so testing the
+combination is disciplined, not mining. This is a one-line universe change in `paper_bot.py`
+(`tier in ('HIGH','MID')` → `tier == 'MID'`).
+
 ## Phase 3 — New signals / bigger builds (exploratory)
 
 - Cross-sectional reversal overlay (rank-and-fade, market-neutral) — removes hidden BTC beta.
