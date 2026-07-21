@@ -182,6 +182,26 @@ project), frequency sweep (only 1h has the full 8-month window).
 **Phase 3 output:** one candidate to forward-test — the **Bollinger \|z\|≥2.5 trigger** — as a paper
 arm, judged live before any adoption. Everything else stays as-is.
 
+### Stat-arb sleeve — RESULT (market-neutral, Avellaneda–Lee OU s-score; `analysis/stat_arb.py`)
+
+Residualize each coin's returns on a market factor, model the idiosyncratic cumulative residual as
+OU, trade the s-score. Causal, 45d holdout, 12 bps round-trip over 2 legs.
+
+| open \|z\| | trades | gross bps | net bps | ann Sharpe | holdout | verdict |
+|---|---|---|---|---|---|---|
+| 1.25 (AL default) | 9258 | +3.8 | −8.2 | −1.80 | −3.89 | costs kill it |
+| 2.0 | 2493 | +7.3 | −4.7 | −0.16 | −3.38 | negative |
+| 2.5 | 562 | +19.7 | +7.7 | −0.06 | −3.00 | net+ but holdout negative |
+| 3.0 | 81 | +75.2 | +63.2 | +5.60 | +6.31 | un-tradeable (~10/yr, noise) |
+
+**Verdict: do NOT build the sleeve.** Gross edge rises monotonically with dislocation size (extreme
+residuals revert harder), but at deployable frequency it's net-negative after two-leg costs and the
+recent holdout is negative — a decayed edge (matches the report's "crypto carry Sharpe turned
+negative in 2025"). Only the |z|≥3 tail clears costs, at ~10 trades/year = statistically meaningless.
+Third reversal-flavored idea to fail on HL perps (after cross-sectional reversal and funding
+extremity): at these horizons the big/idiosyncratic movers **continue** more than they revert.
+Untested refinement: full PCA multi-factor residuals — but priors argue against it rescuing the edge.
+
 ## Adoption discipline
 
 Every experiment carries a one-line hypothesis, an accept criterion (OOS-deflated Sharpe
