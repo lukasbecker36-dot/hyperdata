@@ -83,6 +83,7 @@ class Bot:
         self.cum_pnl = 0.0
         self.n_closed = 0
         self.n_win = 0
+        self.n_liq = 0
         self.universe = {}      # symbol -> tier
         self.rv_thr = RV_FALLBACK[interval]
         # isolated-margin liquidation distance: the adverse move (fraction of notional)
@@ -107,7 +108,7 @@ class Bot:
     def _save_state(self):
         with open(self.state_file, "w") as f:
             json.dump({"positions": self.positions, "cum_pnl": self.cum_pnl,
-                       "n_closed": self.n_closed, "n_win": self.n_win}, f)
+                       "n_closed": self.n_closed, "n_win": self.n_win, "n_liq": self.n_liq}, f)
 
     def _load_state(self):
         if os.path.exists(self.state_file):
@@ -117,6 +118,7 @@ class Bot:
                 self.cum_pnl = s.get("cum_pnl", 0.0)
                 self.n_closed = s.get("n_closed", 0)
                 self.n_win = s.get("n_win", 0)
+                self.n_liq = s.get("n_liq", 0)
             except Exception:
                 pass
 
@@ -259,6 +261,7 @@ class Bot:
         net = gross - fee
         pnl = NOTIONAL * net
         self.cum_pnl += pnl; self.n_closed += 1; self.n_win += 1 if net > 0 else 0
+        self.n_liq += 1 if reason == "liquidation" else 0
         hold_h = (now_ms() - p["entry_ms"]) / 3600000
         with open(self.trade_csv, "a", newline="") as f:
             csv.writer(f).writerow([iso(now_ms()), sym, "SHORT" if d<0 else "LONG",
@@ -317,7 +320,7 @@ class Bot:
             try: self.open_pos(sym, feat["brk"], feat)
             except Exception as e: self.log(f"WARN open {sym}: {e}")
         self.log(f"cycle done: {n_sig} new signals, {len(self.positions)} open, "
-                 f"cum=${self.cum_pnl:+.2f}, {self.n_closed} closed")
+                 f"cum=${self.cum_pnl:+.2f}, {self.n_closed} closed, {self.n_liq} liq")
 
     def run(self):
         lev_s = (f"lev={LEVERAGE}x liq@{self.liq_move*100:.1f}%" if self.liq_move
