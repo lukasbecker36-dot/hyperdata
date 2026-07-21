@@ -68,8 +68,9 @@ def iso(ms):
 
 
 class Bot:
-    def __init__(self, interval, datadir):
+    def __init__(self, interval, datadir, tiers=("HIGH", "MID")):
         self.interval = interval
+        self.tiers = tuple(tiers)            # liquidity tiers to trade (Phase 2: MID-only wins)
         self.bar_min = INTERVAL_MIN[interval]
         self.bar_ms = self.bar_min * 60 * 1000
         self.win = int(WIN_HOURS * 60 / self.bar_min)          # bars in 24h
@@ -189,7 +190,7 @@ class Bot:
         self.log(f"calibrating rv threshold from last {CALIB_DAYS}d ...")
         rvs = []
         lb = int(CALIB_DAYS * 24 * 60 / self.bar_min)
-        syms = [s for s, t in self.universe.items() if t in ("HIGH", "MID")]
+        syms = [s for s, t in self.universe.items() if t in self.tiers]
         for k, s in enumerate(syms):
             try:
                 cs = self.candles(s, lb)
@@ -305,7 +306,7 @@ class Bot:
         # 2) entries
         n_sig = 0
         for sym, tier in self.universe.items():
-            if tier not in ("HIGH", "MID"): continue
+            if tier not in self.tiers: continue
             if sym in self.positions: continue
             if len(self.positions) >= MAX_POSITIONS: break
             try:
@@ -326,7 +327,7 @@ class Bot:
         lev_s = (f"lev={LEVERAGE}x liq@{self.liq_move*100:.1f}%" if self.liq_move
                  else "lev=off (no liquidation)")
         self.log(f"=== paper bot [{self.interval}] starting | notional=${NOTIONAL} maker_fee={MAKER_FEE*1e4}bps "
-                 f"backstop={BACKSTOP_HRS}h maxpos={MAX_POSITIONS} {lev_s} ===")
+                 f"backstop={BACKSTOP_HRS}h maxpos={MAX_POSITIONS} tiers={'+'.join(self.tiers)} {lev_s} ===")
         self.load_universe()
         self.calibrate()
         while True:
@@ -355,9 +356,13 @@ if __name__ == "__main__":
                     help="isolated-margin leverage (default 3x; 0 disables liquidation modelling)")
     ap.add_argument("--maint-margin", type=float, default=None,
                     help="maintenance-margin fraction (default 0.05)")
+    ap.add_argument("--tiers", default="HIGH,MID",
+                    help="liquidity tiers to trade, comma-separated (default HIGH,MID; "
+                         "Phase 2 finding: 'MID' alone is the OOS-validated config)")
     a = ap.parse_args()
     if a.notional: NOTIONAL = a.notional
     if a.leverage is not None: LEVERAGE = a.leverage
     if a.maint_margin is not None: MAINT_MARGIN = a.maint_margin
+    tiers = tuple(t.strip().upper() for t in a.tiers.split(",") if t.strip())
     dd = a.datadir or f"./paper_{a.interval}"
-    Bot(a.interval, dd).run()
+    Bot(a.interval, dd, tiers=tiers).run()
