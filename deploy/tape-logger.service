@@ -1,0 +1,17 @@
+[Unit]
+Description=Hyperliquid trade-tape logger (WS trades channel, full universe — for VPIN/order-flow)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+ExecStart=/usr/bin/python3 /opt/hyperdata/tape_logger.py --datadir /opt/hyperdata/tape
+Restart=always
+RestartSec=15
+StandardOutput=append:/opt/hyperdata/tape/service.out
+StandardError=append:/opt/hyperdata/tape/service.err
+
+[Install]
+WantedBy=multi-user.target

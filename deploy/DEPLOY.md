@@ -77,6 +77,26 @@ mkdir -p /opt/hyperdata/paper_15m_mid
 chown -R hyper:hyper /opt/hyperdata/paper_15m_mid   # service runs as hyper, not root
 ```
 
+## 3b. Trade-tape logger (forward data for VPIN / order-flow)
+
+`tape_logger.py` (stdlib-only, minimal WebSocket client) subscribes to the `trades` channel for
+the **whole active perp universe** and appends each print to `tape/tape_YYYYMMDD.csv`
+(`time_ms,coin,side,px,sz,tid` — `side` = B/A aggressor, which is exactly what VPIN needs).
+Historical ticks aren't available via REST, so this must run **forward** to accumulate tape.
+
+```bash
+# as hyper
+mkdir -p /opt/hyperdata/tape && chown -R hyper:hyper /opt/hyperdata/tape
+# as root
+cp deploy/tape-logger.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now tape-logger
+journalctl -u tape-logger -f          # or: tail -f /opt/hyperdata/tape/tape.log
+```
+
+The log prints a per-minute `heartbeat: N trades logged` so you can confirm it's capturing.
+Storage grows with market activity — check `du -sh /opt/hyperdata/tape` periodically.
+
 ## 4. Watch it
 
 ```bash
