@@ -95,7 +95,10 @@ journalctl -u tape-logger -f          # or: tail -f /opt/hyperdata/tape/tape.log
 ```
 
 The log prints a per-minute `heartbeat: N trades logged` so you can confirm it's capturing.
-Storage grows with market activity — check `du -sh /opt/hyperdata/tape` periodically.
+Each finished day is **gzipped automatically** at UTC midnight (~7× smaller; the current day stays
+plain `.csv` for crash-safety), so expect `tape_YYYYMMDD.csv.gz` at ~30–55 MB/day (~1–2 GB/month).
+Check with `du -sh /opt/hyperdata/tape`. Old `.gz` files are kept (never auto-deleted) — add a
+retention cron if you ever want to prune, but you need the history for the VPIN backtest.
 
 ## 4. Watch it
 

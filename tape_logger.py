@@ -15,7 +15,7 @@ masked). Auto-reconnects with backoff and resubscribes; refreshes the universe d
 
 Run:  python3 tape_logger.py --datadir /opt/hyperdata/tape
 """
-import argparse, base64, csv, json, os, socket, ssl, struct, sys, time
+import argparse, base64, csv, gzip, json, os, shutil, socket, ssl, struct, sys, threading, time
 import urllib.request
 from datetime import datetime, timezone
 
@@ -157,23 +157,45 @@ class TapeLogger:
         self.datadir = datadir
         os.makedirs(datadir, exist_ok=True)
         self.log_file = os.path.join(datadir, "tape.log")
-        self.day = None; self.fh = None; self.writer = None
+        self.day = None; self.fh = None; self.writer = None; self.cur_path = None
         self.n_rows = 0; self.last_flush = 0.0; self.last_stat = 0.0
 
     def log(self, msg):
         line = f"{iso()}  {msg}"; print(line, flush=True)
         with open(self.log_file, "a") as f: f.write(line + "\n")
 
+    def _compress(self, path):
+        """gzip a finished daily file and drop the plain .csv (crash-safe: .csv removed last)."""
+        try:
+            gz = path + ".gz"
+            with open(path, "rb") as fin, gzip.open(gz, "wb", compresslevel=6) as fout:
+                shutil.copyfileobj(fin, fout, length=1 << 20)
+            os.remove(path)
+            self.log(f"compressed {os.path.basename(path)} -> {os.path.basename(gz)} "
+                     f"({os.path.getsize(gz)/1e6:.1f} MB)")
+        except Exception as e:
+            self.log(f"WARN compress {os.path.basename(path)}: {e}")
+
+    def _compress_stale(self):
+        """On startup, gzip any leftover finished-day .csv files (e.g. from a crash mid-day)."""
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        for fn in sorted(os.listdir(self.datadir)):
+            if fn.startswith("tape_") and fn.endswith(".csv") and fn != f"tape_{today}.csv":
+                self._compress(os.path.join(self.datadir, fn))
+
     def _roll(self):
         day = datetime.now(timezone.utc).strftime("%Y%m%d")
         if day != self.day:
-            if self.fh: self.fh.flush(); self.fh.close()
+            if self.fh:
+                self.fh.flush(); self.fh.close()
+                # gzip the just-finished day in the background so capture never blocks
+                threading.Thread(target=self._compress, args=(self.cur_path,), daemon=True).start()
             path = os.path.join(self.datadir, f"tape_{day}.csv")
             new = not os.path.exists(path)
             self.fh = open(path, "a", newline="")
             self.writer = csv.writer(self.fh)
             if new: self.writer.writerow(["time_ms", "coin", "side", "px", "sz", "tid"])
-            self.day = day
+            self.day = day; self.cur_path = path
             self.log(f"writing {path}")
 
     def write_trades(self, trades):
@@ -190,6 +212,7 @@ class TapeLogger:
 
     def run(self):
         self.log("=== tape logger starting (stdlib WS, trades channel) ===")
+        self._compress_stale()          # tidy up any uncompressed finished days from a prior run
         backoff = 1
         universe = []; uni_ts = 0
         while True:
