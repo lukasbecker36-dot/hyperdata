@@ -47,7 +47,13 @@ writing to its own `/opt/hyperdata/paper_15m_mid/`. It is a live A/B against `pa
 (HIGH+MID) to confirm the Phase-2 finding that the edge concentrates in MID-liquidity names
 (HIGH tier holdout Sharpe +0.6 vs MID +6.6; see `IMPROVEMENT_PLAN.md`). Same interval, only the
 universe differs — so the two books are directly comparable. First `git pull` to get the
-`--tiers` flag, then `mkdir -p /opt/hyperdata/paper_15m_mid` before enabling the unit.
+`--tiers` flag, then create the data dir **owned by the `hyper` user** (the service runs as
+`User=hyper`, so a root-owned dir causes `PermissionError` on the trade-log write):
+
+```bash
+mkdir -p /opt/hyperdata/paper_15m_mid
+chown -R hyper:hyper /opt/hyperdata/paper_15m_mid   # service runs as hyper, not root
+```
 
 ## 4. Watch it
 
