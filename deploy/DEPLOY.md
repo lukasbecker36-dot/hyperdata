@@ -40,6 +40,28 @@ systemctl enable --now paper-bot-5m paper-bot-15m paper-bot-15m-mid
 systemctl status paper-bot-5m paper-bot-15m paper-bot-15m-mid
 ```
 
+### Phase-3 Bollinger arms (15m)
+
+Two more A/B arms test the Phase-3 finding that a Bollinger price-z-score trigger (`--trigger
+bollinger`, fade `|z|>=2.5`) beat the range-breakout OOS, and whether it stacks with MID-only:
+
+```bash
+# as hyper (dirs must be owned by the service user)
+mkdir -p /opt/hyperdata/paper_15m_boll /opt/hyperdata/paper_15m_boll_mid
+chown -R hyper:hyper /opt/hyperdata/paper_15m_boll /opt/hyperdata/paper_15m_boll_mid
+# as root
+cp deploy/paper-bot-15m-boll.service     /etc/systemd/system/
+cp deploy/paper-bot-15m-boll-mid.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now paper-bot-15m-boll paper-bot-15m-boll-mid
+```
+
+- `paper-bot-15m-boll` — Bollinger trigger, HIGH+MID (isolates the *trigger* change).
+- `paper-bot-15m-boll-mid` — Bollinger + MID (the *combo*; best backtest Sharpe, but ~2 trades/day,
+  so it validates slowly). Running both separates whether the trigger or the universe drives the edge.
+
+Note the combo trades infrequently — expect long stretches of `0 open` before it fires.
+
 ### Third arm: 15m MID-only (Phase 2 A/B test)
 
 `paper-bot-15m-mid` runs the same strategy but with `--tiers MID` (drops the HIGH-liquidity tier),

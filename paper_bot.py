@@ -38,6 +38,10 @@ LEVERAGE      = 3.0          # isolated-margin leverage; margin posted = NOTIONA
 MAINT_MARGIN  = 0.05         # maintenance-margin fraction (approx; Hyperliquid is per-asset)
 MAX_POSITIONS = 40           # concurrency cap (risk control; no price stop)
 CALIB_DAYS    = 15           # history pulled at startup to calibrate rv threshold
+# entry trigger: "breakout" (24h range pierce) or "bollinger" (price z-score vs a moving mean).
+# Bollinger validated OOS in Phase 3 (|z|>=2.5 beat the range-breakout). See IMPROVEMENT_PLAN.md.
+BOLL_HOURS    = 20           # Bollinger MA/std lookback in hours (~matches the validated 20-bar 1h window)
+BOLL_K        = 2.5          # z-score band for entry: fade |z| >= BOLL_K
 # fallback rv thresholds if calibration fails (computed 2026-07 from historical data)
 RV_FALLBACK   = {"5m": 0.00256, "15m": 0.00514}
 
@@ -68,10 +72,12 @@ def iso(ms):
 
 
 class Bot:
-    def __init__(self, interval, datadir, tiers=("HIGH", "MID")):
+    def __init__(self, interval, datadir, tiers=("HIGH", "MID"), trigger="breakout"):
         self.interval = interval
         self.tiers = tuple(tiers)            # liquidity tiers to trade (Phase 2: MID-only wins)
+        self.trigger = trigger               # "breakout" or "bollinger" (Phase 3)
         self.bar_min = INTERVAL_MIN[interval]
+        self.boll_n = max(5, int(BOLL_HOURS * 60 / INTERVAL_MIN[interval]))  # Bollinger lookback in bars
         self.bar_ms = self.bar_min * 60 * 1000
         self.win = int(WIN_HOURS * 60 / self.bar_min)          # bars in 24h
         self.backstop_ms = BACKSTOP_HRS * 3600 * 1000
@@ -181,9 +187,17 @@ class Bot:
         rets = [math.log(c[j]/c[j-1]) for j in range(i-self.win+1, i+1)]
         mean = sum(rets)/len(rets)
         rv = (sum((r-mean)**2 for r in rets)/len(rets))**0.5
-        brk = 1 if c[i] > prior_h else (-1 if c[i] < prior_l else 0)
+        # Bollinger price z-score over the last boll_n bars
+        seg = c[i-self.boll_n+1:i+1]
+        ma = sum(seg)/len(seg)
+        sd = (sum((x-ma)**2 for x in seg)/len(seg))**0.5
+        z = (c[i]-ma)/sd if sd > 0 else 0.0
+        if self.trigger == "bollinger":
+            brk = 1 if z >= BOLL_K else (-1 if z <= -BOLL_K else 0)   # overbought=+1 (fade short)
+        else:
+            brk = 1 if c[i] > prior_h else (-1 if c[i] < prior_l else 0)
         return {"close": c[i], "close_ms": closed[i]["T"], "prior_h": prior_h, "prior_l": prior_l,
-                "vratio": vratio, "rv": rv, "brk": brk}
+                "ma": ma, "z": z, "vratio": vratio, "rv": rv, "brk": brk}
 
     # ---------- calibration ----------
     def calibrate(self):
@@ -229,8 +243,9 @@ class Bot:
         self.positions[sym] = {"dir": d, "entry_px": entry, "entry_ms": feat["close_ms"],
                                "prior_h": feat["prior_h"], "prior_l": feat["prior_l"],
                                "entry_bid": bid, "entry_ask": ask}
+        sig = f"z={feat['z']:+.2f}" if self.trigger == "bollinger" else "brk"
         self.log(f"OPEN  {sym:12s} {'SHORT' if d<0 else 'LONG ':5s} @ {entry:.6g}  "
-                 f"(vr={feat['vratio']:.1f}x rv={feat['rv']:.4f})  open={len(self.positions)}")
+                 f"({sig} vr={feat['vratio']:.1f}x rv={feat['rv']:.4f})  open={len(self.positions)}")
         self._save_state()
 
     def adverse_excursion(self, cs, p):
@@ -296,8 +311,13 @@ class Bot:
                 continue
             reason = None
             if feat is not None:
-                if p["dir"] < 0 and feat["close"] < p["prior_h"]: reason = "reclaim"
-                elif p["dir"] > 0 and feat["close"] > p["prior_l"]: reason = "reclaim"
+                if self.trigger == "bollinger":
+                    # reclaim = z-score retreated back inside the band (mean-reversion underway)
+                    if p["dir"] < 0 and feat["z"] < BOLL_K: reason = "reclaim"
+                    elif p["dir"] > 0 and feat["z"] > -BOLL_K: reason = "reclaim"
+                else:
+                    if p["dir"] < 0 and feat["close"] < p["prior_h"]: reason = "reclaim"
+                    elif p["dir"] > 0 and feat["close"] > p["prior_l"]: reason = "reclaim"
             if reason is None and now_ms() - p["entry_ms"] >= self.backstop_ms:
                 reason = "backstop"
             if reason:
@@ -326,8 +346,9 @@ class Bot:
     def run(self):
         lev_s = (f"lev={LEVERAGE}x liq@{self.liq_move*100:.1f}%" if self.liq_move
                  else "lev=off (no liquidation)")
+        trig_s = f"trig={self.trigger}" + (f"(z>={BOLL_K},{BOLL_HOURS}h)" if self.trigger == "bollinger" else "")
         self.log(f"=== paper bot [{self.interval}] starting | notional=${NOTIONAL} maker_fee={MAKER_FEE*1e4}bps "
-                 f"backstop={BACKSTOP_HRS}h maxpos={MAX_POSITIONS} tiers={'+'.join(self.tiers)} {lev_s} ===")
+                 f"backstop={BACKSTOP_HRS}h maxpos={MAX_POSITIONS} tiers={'+'.join(self.tiers)} {trig_s} {lev_s} ===")
         self.load_universe()
         self.calibrate()
         while True:
@@ -359,10 +380,12 @@ if __name__ == "__main__":
     ap.add_argument("--tiers", default="HIGH,MID",
                     help="liquidity tiers to trade, comma-separated (default HIGH,MID; "
                          "Phase 2 finding: 'MID' alone is the OOS-validated config)")
+    ap.add_argument("--trigger", choices=["breakout", "bollinger"], default="breakout",
+                    help="entry trigger (Phase 3: 'bollinger' |z|>=2.5 beat the range-breakout OOS)")
     a = ap.parse_args()
     if a.notional: NOTIONAL = a.notional
     if a.leverage is not None: LEVERAGE = a.leverage
     if a.maint_margin is not None: MAINT_MARGIN = a.maint_margin
     tiers = tuple(t.strip().upper() for t in a.tiers.split(",") if t.strip())
     dd = a.datadir or f"./paper_{a.interval}"
-    Bot(a.interval, dd, tiers=tiers).run()
+    Bot(a.interval, dd, tiers=tiers, trigger=a.trigger).run()
