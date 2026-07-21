@@ -28,15 +28,31 @@ On start it loads the universe, calibrates the realized-vol threshold from the l
 (~1–2 min), then wakes ~15s after each bar close, evaluates gates, and paper-fills via the
 order book. Everything is logged to `paper_15m/`.
 
-## 3. Run both as services (survives reboots, auto-restarts)
+## 3. Run as services (survives reboots, auto-restarts)
 
 ```bash
 # as root
-cp /opt/hyperdata/deploy/paper-bot-5m.service  /etc/systemd/system/
-cp /opt/hyperdata/deploy/paper-bot-15m.service /etc/systemd/system/
+cp /opt/hyperdata/deploy/paper-bot-5m.service      /etc/systemd/system/
+cp /opt/hyperdata/deploy/paper-bot-15m.service     /etc/systemd/system/
+cp /opt/hyperdata/deploy/paper-bot-15m-mid.service /etc/systemd/system/   # Phase 2 A/B arm
 systemctl daemon-reload
-systemctl enable --now paper-bot-5m paper-bot-15m
-systemctl status paper-bot-5m paper-bot-15m
+systemctl enable --now paper-bot-5m paper-bot-15m paper-bot-15m-mid
+systemctl status paper-bot-5m paper-bot-15m paper-bot-15m-mid
+```
+
+### Third arm: 15m MID-only (Phase 2 A/B test)
+
+`paper-bot-15m-mid` runs the same strategy but with `--tiers MID` (drops the HIGH-liquidity tier),
+writing to its own `/opt/hyperdata/paper_15m_mid/`. It is a live A/B against `paper-bot-15m`
+(HIGH+MID) to confirm the Phase-2 finding that the edge concentrates in MID-liquidity names
+(HIGH tier holdout Sharpe +0.6 vs MID +6.6; see `IMPROVEMENT_PLAN.md`). Same interval, only the
+universe differs — so the two books are directly comparable. First `git pull` to get the
+`--tiers` flag, then create the data dir **owned by the `hyper` user** (the service runs as
+`User=hyper`, so a root-owned dir causes `PermissionError` on the trade-log write):
+
+```bash
+mkdir -p /opt/hyperdata/paper_15m_mid
+chown -R hyper:hyper /opt/hyperdata/paper_15m_mid   # service runs as hyper, not root
 ```
 
 ## 4. Watch it
@@ -49,9 +65,14 @@ tail -f /opt/hyperdata/paper_15m/bot_15m.log
 # trades + running P&L (last column is cumulative)
 column -t -s, /opt/hyperdata/paper_15m/trades_15m.csv | less -S
 
-# compare the two timeframes at a glance
-for tf in 5m 15m; do
-  echo "== $tf =="; tail -1 /opt/hyperdata/paper_$tf/trades_$tf.csv
+# compare all arms at a glance (last row = cumulative P&L)
+for d in paper_5m paper_15m paper_15m_mid; do
+  echo "== $d =="; tail -1 /opt/hyperdata/$d/trades_*.csv 2>/dev/null
+done
+
+# the A/B that matters: 15m HIGH+MID (control) vs 15m MID-only
+for d in paper_15m paper_15m_mid; do
+  echo "== $d =="; cat /opt/hyperdata/$d/state_15m.json 2>/dev/null; echo
 done
 ```
 
@@ -68,6 +89,11 @@ done
 ## Notes / knobs (top of `paper_bot.py`)
 
 - `MAKER_FEE`, `NOTIONAL`, `MAX_POSITIONS`, `BACKSTOP_HRS`, `VOL_MULT` are constants at the top.
+- **Isolated-margin leverage** (`LEVERAGE`, default 3×; `MAINT_MARGIN`, default 5%; or `--leverage`/`--maint-margin`):
+  models a forced `liquidation` exit when a position's intrabar adverse move since entry crosses
+  `1/LEVERAGE − MAINT_MARGIN` (e.g. 3× → ~28.3%). Set `--leverage 0` to disable. At 3× only ~0.7% of
+  trades liquidate, so paper P&L is nearly unchanged; higher leverage liquidates more (and, per
+  `PAPER_TRADING_ANALYSIS.md`, re-creates the stop that kills the edge). Use **isolated**, not cross.
 - State (`state_*.json`) persists open positions + cumulative P&L, so a restart resumes cleanly.
 - **Fill realism:** the bot assumes maker fills at the touch. This is optimistic — it does not model
   queue position or whether a real trade printed through. The next upgrade is a shadow-fill mode that

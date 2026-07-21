@@ -34,6 +34,8 @@ BACKSTOP_HRS  = 8            # max hold
 RV_PCTILE     = 0.60         # keep top 40% realized vol -> threshold = 60th pct of signal rv
 MAKER_FEE     = 0.00015      # 1.5 bps per side (Hyperliquid base maker fee)
 NOTIONAL      = 100.0        # USD notional per paper trade
+LEVERAGE      = 3.0          # isolated-margin leverage; margin posted = NOTIONAL/LEVERAGE. 0 = off
+MAINT_MARGIN  = 0.05         # maintenance-margin fraction (approx; Hyperliquid is per-asset)
 MAX_POSITIONS = 40           # concurrency cap (risk control; no price stop)
 CALIB_DAYS    = 15           # history pulled at startup to calibrate rv threshold
 # fallback rv thresholds if calibration fails (computed 2026-07 from historical data)
@@ -66,8 +68,9 @@ def iso(ms):
 
 
 class Bot:
-    def __init__(self, interval, datadir):
+    def __init__(self, interval, datadir, tiers=("HIGH", "MID")):
         self.interval = interval
+        self.tiers = tuple(tiers)            # liquidity tiers to trade (Phase 2: MID-only wins)
         self.bar_min = INTERVAL_MIN[interval]
         self.bar_ms = self.bar_min * 60 * 1000
         self.win = int(WIN_HOURS * 60 / self.bar_min)          # bars in 24h
@@ -81,8 +84,13 @@ class Bot:
         self.cum_pnl = 0.0
         self.n_closed = 0
         self.n_win = 0
+        self.n_liq = 0
         self.universe = {}      # symbol -> tier
         self.rv_thr = RV_FALLBACK[interval]
+        # isolated-margin liquidation distance: the adverse move (fraction of notional)
+        # that wipes posted margin down to maintenance -> forced exit. None disables it.
+        lm = (1.0 / LEVERAGE - MAINT_MARGIN) if LEVERAGE and LEVERAGE > 0 else None
+        self.liq_move = lm if (lm is not None and lm > 0) else None
         self._load_state()
         if not os.path.exists(self.trade_csv):
             with open(self.trade_csv, "w", newline="") as f:
@@ -101,7 +109,7 @@ class Bot:
     def _save_state(self):
         with open(self.state_file, "w") as f:
             json.dump({"positions": self.positions, "cum_pnl": self.cum_pnl,
-                       "n_closed": self.n_closed, "n_win": self.n_win}, f)
+                       "n_closed": self.n_closed, "n_win": self.n_win, "n_liq": self.n_liq}, f)
 
     def _load_state(self):
         if os.path.exists(self.state_file):
@@ -111,6 +119,7 @@ class Bot:
                 self.cum_pnl = s.get("cum_pnl", 0.0)
                 self.n_closed = s.get("n_closed", 0)
                 self.n_win = s.get("n_win", 0)
+                self.n_liq = s.get("n_liq", 0)
             except Exception:
                 pass
 
@@ -181,7 +190,7 @@ class Bot:
         self.log(f"calibrating rv threshold from last {CALIB_DAYS}d ...")
         rvs = []
         lb = int(CALIB_DAYS * 24 * 60 / self.bar_min)
-        syms = [s for s, t in self.universe.items() if t in ("HIGH", "MID")]
+        syms = [s for s, t in self.universe.items() if t in self.tiers]
         for k, s in enumerate(syms):
             try:
                 cs = self.candles(s, lb)
@@ -224,18 +233,36 @@ class Bot:
                  f"(vr={feat['vratio']:.1f}x rv={feat['rv']:.4f})  open={len(self.positions)}")
         self._save_state()
 
-    def close_pos(self, sym, reason):
+    def adverse_excursion(self, cs, p):
+        """Max adverse move (fraction of entry) over intrabar highs/lows since entry.
+        Short -> up-moves hurt (highs); long -> down-moves hurt (lows). Models the
+        worst point the position passed through between polls, for liquidation checks."""
+        d = p["dir"]; entry = p["entry_px"]; worst = 0.0
+        for c in cs:
+            if c["T"] <= p["entry_ms"]:     # bar at/before entry -> not part of the hold
+                continue
+            if c["t"] > now_ms():           # unformed future bar
+                continue
+            adv = (float(c["h"]) - entry) / entry if d < 0 else (entry - float(c["l"])) / entry
+            if adv > worst: worst = adv
+        return worst
+
+    def close_pos(self, sym, reason, forced_px=None):
         p = self.positions[sym]
-        ba = self.best_bid_ask(sym)
-        if ba is None: return
-        bid, ask = ba
         d = p["dir"]
-        exit_px = bid if d < 0 else ask     # short closes by buying at bid; long sells at ask
+        if forced_px is not None:           # forced exit at a known price (e.g. liquidation)
+            bid = ask = exit_px = forced_px
+        else:
+            ba = self.best_bid_ask(sym)
+            if ba is None: return
+            bid, ask = ba
+            exit_px = bid if d < 0 else ask # short closes by buying at bid; long sells at ask
         gross = d * (exit_px - p["entry_px"]) / p["entry_px"]
         fee = 2 * MAKER_FEE
         net = gross - fee
         pnl = NOTIONAL * net
         self.cum_pnl += pnl; self.n_closed += 1; self.n_win += 1 if net > 0 else 0
+        self.n_liq += 1 if reason == "liquidation" else 0
         hold_h = (now_ms() - p["entry_ms"]) / 3600000
         with open(self.trade_csv, "a", newline="") as f:
             csv.writer(f).writerow([iso(now_ms()), sym, "SHORT" if d<0 else "LONG",
@@ -254,9 +281,19 @@ class Bot:
         for sym in list(self.positions.keys()):
             p = self.positions[sym]
             try:
-                feat = self.features(self.candles(sym, self.win + 5))
+                cs = self.candles(sym, self.win + 5)
+                feat = self.features(cs)
             except Exception as e:
                 self.log(f"WARN candles {sym}: {e}"); continue
+            # 0) isolated-margin liquidation: forced exit if the intrabar adverse move
+            #    since entry crossed the liquidation threshold (1/L - maintenance margin).
+            #    Priority over reclaim/backstop since it happens intrabar, first.
+            if self.liq_move and self.adverse_excursion(cs, p) >= self.liq_move:
+                liq_px = (p["entry_px"] * (1 + self.liq_move) if p["dir"] < 0
+                          else p["entry_px"] * (1 - self.liq_move))
+                try: self.close_pos(sym, "liquidation", forced_px=liq_px)
+                except Exception as e: self.log(f"WARN liq {sym}: {e}")
+                continue
             reason = None
             if feat is not None:
                 if p["dir"] < 0 and feat["close"] < p["prior_h"]: reason = "reclaim"
@@ -269,7 +306,7 @@ class Bot:
         # 2) entries
         n_sig = 0
         for sym, tier in self.universe.items():
-            if tier not in ("HIGH", "MID"): continue
+            if tier not in self.tiers: continue
             if sym in self.positions: continue
             if len(self.positions) >= MAX_POSITIONS: break
             try:
@@ -284,11 +321,13 @@ class Bot:
             try: self.open_pos(sym, feat["brk"], feat)
             except Exception as e: self.log(f"WARN open {sym}: {e}")
         self.log(f"cycle done: {n_sig} new signals, {len(self.positions)} open, "
-                 f"cum=${self.cum_pnl:+.2f}, {self.n_closed} closed")
+                 f"cum=${self.cum_pnl:+.2f}, {self.n_closed} closed, {self.n_liq} liq")
 
     def run(self):
+        lev_s = (f"lev={LEVERAGE}x liq@{self.liq_move*100:.1f}%" if self.liq_move
+                 else "lev=off (no liquidation)")
         self.log(f"=== paper bot [{self.interval}] starting | notional=${NOTIONAL} maker_fee={MAKER_FEE*1e4}bps "
-                 f"backstop={BACKSTOP_HRS}h maxpos={MAX_POSITIONS} ===")
+                 f"backstop={BACKSTOP_HRS}h maxpos={MAX_POSITIONS} tiers={'+'.join(self.tiers)} {lev_s} ===")
         self.load_universe()
         self.calibrate()
         while True:
@@ -313,7 +352,17 @@ if __name__ == "__main__":
     ap.add_argument("--interval", choices=["5m", "15m"], required=True)
     ap.add_argument("--datadir", default=None)
     ap.add_argument("--notional", type=float, default=None)
+    ap.add_argument("--leverage", type=float, default=None,
+                    help="isolated-margin leverage (default 3x; 0 disables liquidation modelling)")
+    ap.add_argument("--maint-margin", type=float, default=None,
+                    help="maintenance-margin fraction (default 0.05)")
+    ap.add_argument("--tiers", default="HIGH,MID",
+                    help="liquidity tiers to trade, comma-separated (default HIGH,MID; "
+                         "Phase 2 finding: 'MID' alone is the OOS-validated config)")
     a = ap.parse_args()
     if a.notional: NOTIONAL = a.notional
+    if a.leverage is not None: LEVERAGE = a.leverage
+    if a.maint_margin is not None: MAINT_MARGIN = a.maint_margin
+    tiers = tuple(t.strip().upper() for t in a.tiers.split(",") if t.strip())
     dd = a.datadir or f"./paper_{a.interval}"
-    Bot(a.interval, dd).run()
+    Bot(a.interval, dd, tiers=tiers).run()
