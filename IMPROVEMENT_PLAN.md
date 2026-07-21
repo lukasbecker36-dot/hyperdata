@@ -202,6 +202,25 @@ Third reversal-flavored idea to fail on HL perps (after cross-sectional reversal
 extremity): at these horizons the big/idiosyncratic movers **continue** more than they revert.
 Untested refinement: full PCA multi-factor residuals — but priors argue against it rescuing the edge.
 
+### Continuation as a strategy — RESULT (`cont_momentum.py`, `ts_continuation.py`)
+
+Tested because every failed reversal idea *implies* continuation. Two forms, both rejected:
+
+- **Cross-sectional momentum** (long winners / short losers, 24h–2w lookbacks/holds): gross negative
+  at almost every horizon, all Sharpes negative after cost, holdouts deeply negative. So the
+  cross-sectional dimension carries **no cost-surviving factor in either direction** — reversal AND
+  momentum fail; it's not that "continuation dominates."
+- **Time-series breakout continuation** (ride the 24h breakout, incl. HIGH-liquidity where the fade
+  doesn't fire): net **−13 to −40 bps/trade** across all tiers/horizons, negative holdouts. Riding
+  breakouts loses even in the liquid names.
+
+**Verdict: do NOT build a continuation book.** Neither broad reversal nor broad continuation clears
+costs on HL perps. The ONLY real edge is the narrow, multi-gated **volume-exhaustion fade in MID
+names** — breakouts on average go nowhere net of cost *except* in the specific exhaustion regime the
+fade identifies (the continuation of vol-spike breakouts in MID loses −33 bps, the strong mirror of
+the fade's strength there — confirming the edge is genuinely conditional, not a broad factor).
+Momentum would also add its own crash-tail risk. Stop adding strategies; run the validated fade arms.
+
 ## Adoption discipline
 
 Every experiment carries a one-line hypothesis, an accept criterion (OOS-deflated Sharpe
