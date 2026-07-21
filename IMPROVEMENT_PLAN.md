@@ -145,6 +145,43 @@ combination is disciplined, not mining. This is a one-line universe change in `p
 - VPIN / order-flow confirmation — **blocked**; start forward-logging the tape now.
 - Stat-arb pairs sleeve — separate diversifying project.
 
+### Phase 3 — RESULT (causal series, baseline holdout Sharpe +4.31, r/DD 2.35)
+
+| Construction | best config | Sharpe | holdout | total | maxDD | r/DD | Verdict |
+|---|---|---|---|---|---|---|---|
+| **A) Bollinger / price z-score** (replace breakout) | **\|z\|≥2.5** | **+5.36** | **+6.46** | +$1040 | −$214 | **4.85** | **PROMISING** |
+| A) Bollinger as extra gate on breakout | +\|z\|≥2 | +4.33 | +4.75 | +$737 | −$299 | 2.47 | marginal |
+| B) Volume log-z-score (replace 5×) | z≥2 | +4.28 | +5.62 | +$694 | −$299 | 2.32 | neutral — ≈ 5× median |
+| C) RSI(2) extreme | 95/5 | +3.36 | +3.92 | +$648 | −$424 | 1.53 | reject — worse |
+| D) Cross-sectional reversal | any lookback | −2.9 | **−6.4** | −$51 | −$62 | neg | **reject — negative** |
+
+**A) Bollinger / price z-score — the one real win.** Fading a **\|z\| ≥ 2.5** stretch (price vs 20-bar
+MA) *as a replacement for the range-breakout* dominates the baseline on every axis: Sharpe +5.36 vs
++3.67, **holdout +6.46 vs +4.31**, same total return, and r/DD **4.85 vs 2.35** with a smaller maxDD.
+This is believable because it's a *refinement of the same edge* (the report's point: Bollinger is the
+continuous version of the discrete range-pierce), not a new factor — the z-score trigger is cleaner
+than a raw marginal new-high. **But** it's a selected config after many trials, so it does not get
+adopted off a backtest — it gets **forward-tested as a paper arm** (like MID-only) before trusting it.
+
+**B) Volume log-z-score — neutral.** z≥2 is ~indistinguishable from the 5× median (holdout a touch
+better, r/DD the same). The report's "normalization tightens the signal" doesn't show up here — keep
+5× median (simpler), or z≥2 as a wash. No adopt.
+
+**C) RSI(2) — reject.** Generates far more, lower-quality signals (+11–15 bps/trade) with worse Sharpe
+and r/DD than the breakout. Not a useful trigger here.
+
+**D) Cross-sectional reversal — reject, and it contradicts the report.** Ranking the universe by past
+return and fading the extremes (market-neutral) is **negative at every lookback** (holdout −6.4). At
+the 8h horizon Hyperliquid's biggest movers show **continuation, not reversal** — consistent with
+Liu–Tsyvinski–Wu's point that the largest movers carry momentum. The report's "cross-sectional is
+often more robust" does not hold on this data/horizon.
+
+**Not run:** VPIN/order-flow (needs the historical trade tape — unavailable), stat-arb pairs (separate
+project), frequency sweep (only 1h has the full 8-month window).
+
+**Phase 3 output:** one candidate to forward-test — the **Bollinger \|z\|≥2.5 trigger** — as a paper
+arm, judged live before any adoption. Everything else stays as-is.
+
 ## Adoption discipline
 
 Every experiment carries a one-line hypothesis, an accept criterion (OOS-deflated Sharpe
