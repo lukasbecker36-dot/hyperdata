@@ -24,6 +24,10 @@ Run TWO instances to compare timeframes live:
 import argparse, json, os, sys, time, math, csv
 from datetime import datetime, timezone
 import urllib.request
+try:
+    import telegram_notify as tg          # optional Telegram push; must never break trading
+except Exception:
+    tg = None
 
 API = "https://api.hyperliquid.xyz/info"
 
@@ -91,6 +95,10 @@ class Bot:
         self.n_closed = 0
         self.n_win = 0
         self.n_liq = 0
+        # arm label for Telegram (paper_15m_mid -> "15m-mid"), so each arm is distinguishable
+        base = os.path.basename(os.path.normpath(datadir))
+        self.label = (base[6:] if base.startswith("paper_") else base).replace("_", "-") or interval
+        self._last_summary_day = None
         self.universe = {}      # symbol -> tier
         self.rv_thr = RV_FALLBACK[interval]
         # isolated-margin liquidation distance: the adverse move (fraction of notional)
@@ -111,6 +119,29 @@ class Bot:
         print(line, flush=True)
         with open(self.log_file, "a") as f:
             f.write(line + "\n")
+
+    def notify(self, msg):
+        """Best-effort Telegram push, tagged with this arm's label. Never raises."""
+        if tg is None or not tg.enabled():
+            return
+        try:
+            tg.send(f"<b>[{self.label}]</b> {msg}")
+        except Exception:
+            pass
+
+    def _winrate(self):
+        return self.n_win / self.n_closed * 100 if self.n_closed else 0.0
+
+    def _maybe_daily_summary(self):
+        """Once per UTC day, push a P&L snapshot (skips the first cycle after (re)start)."""
+        today = datetime.now(timezone.utc).date()
+        if self._last_summary_day == today:
+            return
+        if self._last_summary_day is not None:
+            self.notify(f"\U0001F4C8 daily summary\ncum P&amp;L: ${self.cum_pnl:+.2f}\n"
+                        f"closed: {self.n_closed}  win: {self._winrate():.0f}%  liq: {self.n_liq}\n"
+                        f"open: {len(self.positions)}")
+        self._last_summary_day = today
 
     def _save_state(self):
         with open(self.state_file, "w") as f:
@@ -246,6 +277,8 @@ class Bot:
         sig = f"z={feat['z']:+.2f}" if self.trigger == "bollinger" else "brk"
         self.log(f"OPEN  {sym:12s} {'SHORT' if d<0 else 'LONG ':5s} @ {entry:.6g}  "
                  f"({sig} vr={feat['vratio']:.1f}x rv={feat['rv']:.4f})  open={len(self.positions)}")
+        self.notify(f"\U0001F7E2 OPEN {'SHORT' if d<0 else 'LONG'} <b>{sym}</b> @ {entry:.6g}\n"
+                    f"{sig}  vr={feat['vratio']:.1f}x  rv={feat['rv']:.4f}  open={len(self.positions)}")
         self._save_state()
 
     def adverse_excursion(self, cs, p):
@@ -286,6 +319,10 @@ class Bot:
                 p["entry_bid"], p["entry_ask"], bid, ask, f"{self.cum_pnl:.4f}"])
         self.log(f"CLOSE {sym:12s} {reason:8s} net={net*1e4:+6.1f}bps pnl=${pnl:+.3f}  "
                  f"cum=${self.cum_pnl:+.2f} trades={self.n_closed} win={self.n_win/max(1,self.n_closed)*100:.0f}%")
+        emoji = "\U0001F534" if net <= 0 else "\U0001F535"       # red loss / blue win
+        self.notify(f"{emoji} CLOSE <b>{sym}</b> ({reason})\n"
+                    f"net={net*1e4:+.1f}bps  pnl=${pnl:+.3f}  hold={hold_h:.1f}h\n"
+                    f"cum=${self.cum_pnl:+.2f}  trades={self.n_closed}  win={self._winrate():.0f}%")
         del self.positions[sym]
         self._save_state()
 
@@ -349,6 +386,8 @@ class Bot:
         trig_s = f"trig={self.trigger}" + (f"(z>={BOLL_K},{BOLL_HOURS}h)" if self.trigger == "bollinger" else "")
         self.log(f"=== paper bot [{self.interval}] starting | notional=${NOTIONAL} maker_fee={MAKER_FEE*1e4}bps "
                  f"backstop={BACKSTOP_HRS}h maxpos={MAX_POSITIONS} tiers={'+'.join(self.tiers)} {trig_s} {lev_s} ===")
+        self.notify(f"\U0001F916 bot started ({trig_s or 'trig=breakout'}, tiers={'+'.join(self.tiers)})\n"
+                    f"resuming: cum=${self.cum_pnl:+.2f}  open={len(self.positions)}  closed={self.n_closed}")
         self.load_universe()
         self.calibrate()
         while True:
@@ -361,6 +400,8 @@ class Bot:
                 self.cycle()
             except Exception as e:
                 self.log(f"ERROR cycle: {e}")
+                self.notify(f"⚠️ cycle error: {e}")
+            self._maybe_daily_summary()
             # refresh universe/tiers once a day
             if int(time.time()) % 86400 < self.bar_min * 60:
                 try: self.load_universe()

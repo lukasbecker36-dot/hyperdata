@@ -8,7 +8,7 @@ Type=simple
 User=hyper
 WorkingDirectory=/opt/hyperdata
 EnvironmentFile=/etc/hyperdata/telegram.env
-Environment=BOT_DATADIRS=5m:/opt/hyperdata/paper_5m,15m:/opt/hyperdata/paper_15m,15m:/opt/hyperdata/paper_15m_mid:15m-mid,15m:/opt/hyperdata/paper_15m_boll:15m-boll,15m:/opt/hyperdata/paper_15m_boll_mid:15m-bollmid
+Environment=BOT_DATADIRS=5m:/opt/hyperdata/paper_5m,15m:/opt/hyperdata/paper_15m,15m:/opt/hyperdata/paper_15m_mid:15m-mid,15m:/opt/hyperdata/paper_15m_boll:15m-boll,15m:/opt/hyperdata/paper_15m_boll_mid:15m-boll-mid
 # /update knobs (defaults shown; override here if your paths differ)
 Environment=REPO_DIR=/opt/hyperdata
 Environment=RESTART_UNITS=paper-bot-5m paper-bot-15m paper-bot-15m-mid paper-bot-15m-boll paper-bot-15m-boll-mid

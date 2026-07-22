@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=hyper
 WorkingDirectory=/opt/hyperdata
+EnvironmentFile=-/etc/hyperdata/telegram.env
 ExecStart=/usr/bin/python3 /opt/hyperdata/paper_bot.py --interval 15m --trigger bollinger --datadir /opt/hyperdata/paper_15m_boll
 Restart=always
 RestartSec=15

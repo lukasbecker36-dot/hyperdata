@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 User=hyper
 WorkingDirectory=/opt/hyperdata
+EnvironmentFile=-/etc/hyperdata/telegram.env
 ExecStart=/usr/bin/python3 /opt/hyperdata/paper_bot.py --interval 5m --datadir /opt/hyperdata/paper_5m
 Restart=always
 RestartSec=15
