@@ -263,6 +263,22 @@ reweighting carries real information (a trade-specific reweight can't raise $ Sh
 arm is the test. Uses daily dollar-P&L Sharpe (portfolio-realistic), not comparable to the
 daily-mean-return Sharpe elsewhere; compare ats-vs-flat within this table only.
 
+**ATS x {trigger, universe}** (`analysis/ats_combos.py`, ats vs flat, return/DD = scale-free):
+
+| config | flat ret/DD | ats ret/DD | flat holdout | ats holdout |
+|---|---|---|---|---|
+| ats (breakout HM) | 2.21 | **4.06** | +1.45 | +1.48 |
+| ats+mid | 3.30 | **2.98** | +5.21 | +3.89 |
+| ats+boll | 4.62 | **6.73** | +5.16 | +4.25 |
+| ats+mid+boll | 4.50 | 5.69 (maxDD −96→−111) | +5.28 | +4.50 |
+
+ATS sizing **helps in the broad HIGH+MID universe** (breakout & boll: return/DD up, DD flat-to-smaller)
+but **hurts stacked on MID-only** (ats+mid: return/DD 3.30→2.98, maxDD −158→−254) — MID already
+concentrates into few selective trades, so up-sizing over-concentrates the tail; the two concentration
+levers are redundant/conflicting. And the **45d holdout does not confirm ats in any config** (flat in
+base, lower in every combo) — the gains are in-sample. So the deployed `15m-ats` arm (breakout HM +
+ats) is the best ats config; do NOT build ats+mid arms. Live arm is the deciding test.
+
 ## Adoption discipline
 
 Every experiment carries a one-line hypothesis, an accept criterion (OOS-deflated Sharpe
