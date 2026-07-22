@@ -46,6 +46,11 @@ CALIB_DAYS    = 15           # history pulled at startup to calibrate rv thresho
 # Bollinger validated OOS in Phase 3 (|z|>=2.5 beat the range-breakout). See IMPROVEMENT_PLAN.md.
 BOLL_HOURS    = 20           # Bollinger MA/std lookback in hours (~matches the validated 20-bar 1h window)
 BOLL_K        = 2.5          # z-score band for entry: fade |z| >= BOLL_K
+# avg-trade-size sizing (whale-vs-crowd): scale notional by the spike's avg-trade-size ratio
+# (v/n vs trailing median). Big-trade spikes fade harder -> bet more. Opt-in via --size-by-ats.
+SIZE_REF      = 2.0          # ats-ratio mapping to 1.0x notional (a typical spike)
+SIZE_MIN      = 0.5          # notional multiplier floor
+SIZE_MAX      = 3.0          # notional multiplier cap
 # fallback rv thresholds if calibration fails (computed 2026-07 from historical data)
 RV_FALLBACK   = {"5m": 0.00256, "15m": 0.00514}
 
@@ -76,10 +81,11 @@ def iso(ms):
 
 
 class Bot:
-    def __init__(self, interval, datadir, tiers=("HIGH", "MID"), trigger="breakout"):
+    def __init__(self, interval, datadir, tiers=("HIGH", "MID"), trigger="breakout", size_by_ats=False):
         self.interval = interval
         self.tiers = tuple(tiers)            # liquidity tiers to trade (Phase 2: MID-only wins)
         self.trigger = trigger               # "breakout" or "bollinger" (Phase 3)
+        self.size_by_ats = size_by_ats       # scale notional by avg-trade-size ratio (whale-vs-crowd)
         self.bar_min = INTERVAL_MIN[interval]
         self.boll_n = max(5, int(BOLL_HOURS * 60 / INTERVAL_MIN[interval]))  # Bollinger lookback in bars
         self.bar_ms = self.bar_min * 60 * 1000
@@ -210,11 +216,18 @@ class Bot:
         h = [float(x["h"]) for x in closed]
         l = [float(x["l"]) for x in closed]
         v = [float(x["v"]) for x in closed]
+        n = [float(x.get("n", 0)) for x in closed]     # number of trades per bar
         i = len(closed) - 1
         prior_h = max(h[i-self.win:i])
         prior_l = min(l[i-self.win:i])
         pv = sorted(v[i-self.win:i]); med = pv[len(pv)//2]
         vratio = v[i] / med if med > 0 else 0
+        # avg-trade-size ratio: (v/n at signal) vs trailing-median(v/n). >1 = unusually big trades.
+        ats_ratio = None
+        if n[i] > 0:
+            pa = sorted(v[j]/n[j] for j in range(i-self.win, i) if n[j] > 0)
+            if len(pa) >= self.win // 2 and pa[len(pa)//2] > 0:
+                ats_ratio = (v[i]/n[i]) / pa[len(pa)//2]
         rets = [math.log(c[j]/c[j-1]) for j in range(i-self.win+1, i+1)]
         mean = sum(rets)/len(rets)
         rv = (sum((r-mean)**2 for r in rets)/len(rets))**0.5
@@ -228,7 +241,7 @@ class Bot:
         else:
             brk = 1 if c[i] > prior_h else (-1 if c[i] < prior_l else 0)
         return {"close": c[i], "close_ms": closed[i]["T"], "prior_h": prior_h, "prior_l": prior_l,
-                "ma": ma, "z": z, "vratio": vratio, "rv": rv, "brk": brk}
+                "ma": ma, "z": z, "vratio": vratio, "rv": rv, "brk": brk, "ats_ratio": ats_ratio}
 
     # ---------- calibration ----------
     def calibrate(self):
@@ -271,14 +284,20 @@ class Bot:
             d, entry = -1, ask
         else:             # down-breakout -> fade LONG -> buy at bid (maker)
             d, entry = 1, bid
+        # avg-trade-size sizing: scale notional up on big-trade ("whale") spikes
+        mult = 1.0
+        if self.size_by_ats and feat.get("ats_ratio"):
+            mult = min(SIZE_MAX, max(SIZE_MIN, feat["ats_ratio"] / SIZE_REF))
+        notional = NOTIONAL * mult
         self.positions[sym] = {"dir": d, "entry_px": entry, "entry_ms": feat["close_ms"],
                                "prior_h": feat["prior_h"], "prior_l": feat["prior_l"],
-                               "entry_bid": bid, "entry_ask": ask}
+                               "entry_bid": bid, "entry_ask": ask, "notional": notional}
         sig = f"z={feat['z']:+.2f}" if self.trigger == "bollinger" else "brk"
+        szs = f" size={mult:.1f}x" if self.size_by_ats else ""
         self.log(f"OPEN  {sym:12s} {'SHORT' if d<0 else 'LONG ':5s} @ {entry:.6g}  "
-                 f"({sig} vr={feat['vratio']:.1f}x rv={feat['rv']:.4f})  open={len(self.positions)}")
+                 f"({sig} vr={feat['vratio']:.1f}x rv={feat['rv']:.4f}{szs})  open={len(self.positions)}")
         self.notify(f"\U0001F7E2 OPEN {'SHORT' if d<0 else 'LONG'} <b>{sym}</b> @ {entry:.6g}\n"
-                    f"{sig}  vr={feat['vratio']:.1f}x  rv={feat['rv']:.4f}  open={len(self.positions)}")
+                    f"{sig}  vr={feat['vratio']:.1f}x  rv={feat['rv']:.4f}{szs}  open={len(self.positions)}")
         self._save_state()
 
     def adverse_excursion(self, cs, p):
@@ -308,7 +327,7 @@ class Bot:
         gross = d * (exit_px - p["entry_px"]) / p["entry_px"]
         fee = 2 * MAKER_FEE
         net = gross - fee
-        pnl = NOTIONAL * net
+        pnl = p.get("notional", NOTIONAL) * net
         self.cum_pnl += pnl; self.n_closed += 1; self.n_win += 1 if net > 0 else 0
         self.n_liq += 1 if reason == "liquidation" else 0
         hold_h = (now_ms() - p["entry_ms"]) / 3600000
@@ -384,6 +403,7 @@ class Bot:
         lev_s = (f"lev={LEVERAGE}x liq@{self.liq_move*100:.1f}%" if self.liq_move
                  else "lev=off (no liquidation)")
         trig_s = f"trig={self.trigger}" + (f"(z>={BOLL_K},{BOLL_HOURS}h)" if self.trigger == "bollinger" else "")
+        trig_s += "  size=ats" if self.size_by_ats else ""
         self.log(f"=== paper bot [{self.interval}] starting | notional=${NOTIONAL} maker_fee={MAKER_FEE*1e4}bps "
                  f"backstop={BACKSTOP_HRS}h maxpos={MAX_POSITIONS} tiers={'+'.join(self.tiers)} {trig_s} {lev_s} ===")
         self.notify(f"\U0001F916 bot started ({trig_s or 'trig=breakout'}, tiers={'+'.join(self.tiers)})\n"
@@ -423,10 +443,12 @@ if __name__ == "__main__":
                          "Phase 2 finding: 'MID' alone is the OOS-validated config)")
     ap.add_argument("--trigger", choices=["breakout", "bollinger"], default="breakout",
                     help="entry trigger (Phase 3: 'bollinger' |z|>=2.5 beat the range-breakout OOS)")
+    ap.add_argument("--size-by-ats", action="store_true",
+                    help="scale notional by the spike's avg-trade-size ratio (whale-vs-crowd conviction)")
     a = ap.parse_args()
     if a.notional: NOTIONAL = a.notional
     if a.leverage is not None: LEVERAGE = a.leverage
     if a.maint_margin is not None: MAINT_MARGIN = a.maint_margin
     tiers = tuple(t.strip().upper() for t in a.tiers.split(",") if t.strip())
     dd = a.datadir or f"./paper_{a.interval}"
-    Bot(a.interval, dd, tiers=tiers, trigger=a.trigger).run()
+    Bot(a.interval, dd, tiers=tiers, trigger=a.trigger, size_by_ats=a.size_by_ats).run()

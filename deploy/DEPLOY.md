@@ -62,6 +62,20 @@ systemctl enable --now paper-bot-15m-boll paper-bot-15m-boll-mid
 
 Note the combo trades infrequently — expect long stretches of `0 open` before it fires.
 
+### Avg-trade-size sizing arm (15m)
+
+`paper-bot-15m-ats` runs the plain breakout fade (HIGH+MID, like the `15m` control) but **scales
+each position's notional by the spike's avg-trade-size ratio** (`--size-by-ats`): big-trade
+("whale") spikes fade harder, so they get up to 3× size; crowd spikes get as little as 0.5×. Only
+the sizing differs from the `15m` control, so P&L difference isolates the whale-vs-crowd conviction
+signal (see `analysis/avg_trade_size.py`). Average notional runs a bit above $100 (right-skewed).
+
+```bash
+mkdir -p /opt/hyperdata/paper_15m_ats && chown -R hyper:hyper /opt/hyperdata/paper_15m_ats
+cp deploy/paper-bot-15m-ats.service /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now paper-bot-15m-ats
+```
+
 ### Third arm: 15m MID-only (Phase 2 A/B test)
 
 `paper-bot-15m-mid` runs the same strategy but with `--tiers MID` (drops the HIGH-liquidity tier),
