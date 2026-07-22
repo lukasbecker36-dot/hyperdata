@@ -138,6 +138,26 @@ estimate), and the risk-adjusted optimum is clearly ~8h. A case where the OU heu
 combination is disciplined, not mining. This is a one-line universe change in `paper_bot.py`
 (`tier in ('HIGH','MID')` → `tier == 'MID'`).
 
+### Funding CARRY — RESULT (`analysis/carry.py`) — REJECT
+
+First test to count the funding *cashflow* as income (all prior tests were price-return only).
+Cross-sectional funding sort: short top-decile funding (collect), long bottom-decile, held H hours,
+market-neutral, decomposed into price vs funding components.
+
+| hold | PRICE bps | FUND bps | TOTAL bps |
+|---|---|---|---|
+| 8h | −52.4 | +3.4 | −49.0 |
+| 168h (1w) | −240.9 | +50.0 | −190.9 |
+
+Funding income is real and scales with hold, but the **adverse price move dwarfs it 4–5×** at every
+horizon — you're paid the carry because the crowded side keeps winning short-term. The funding-sorted
+long-short basket is a **momentum/beta bet in disguise** (high-funding = pumping high-beta alts), so it
+just expresses "short the winners" and bleeds in a trending regime; the funding cashflow is a rounding
+error on that price tilt (the ±30 Sharpes are regime artifacts, not alpha). Harvesting carry cleanly
+needs a **delta-neutral spot hedge** (no spot data here), and even then income is ~0.1 bps/hr. (Note:
+one dataset gotcha fixed here — funding timestamps aren't hour-aligned to candles, so accrue by time
+window, not exact-ms match.)
+
 ## Phase 3 — New signals / bigger builds (exploratory)
 
 - Cross-sectional reversal overlay (rank-and-fade, market-neutral) — removes hidden BTC beta.
