@@ -221,6 +221,29 @@ fade identifies (the continuation of vol-spike breakouts in MID loses −33 bps,
 the fade's strength there — confirming the edge is genuinely conditional, not a broad factor).
 Momentum would also add its own crash-tail risk. Stop adding strategies; run the validated fade arms.
 
+### Whale-vs-crowd (avg trade size) — RESULT (`analysis/avg_trade_size.py`) — PROMISING
+
+Uses `num_trades` (never used before). Decompose each 5× spike into trade-count vs avg-trade-size
+(v/n), normalized per-coin vs trailing 24h. Hypothesis was "crowd spikes = exhaustion → fade";
+data says the **opposite** — the fade is strongest on **high avg-trade-size** spikes (few big
+aggressive trades):
+
+| avg-trade-size quartile | net/trade | win% | holdout Sh |
+|---|---|---|---|
+| Q1 (crowd/small) | +9.7 bps | 55% | +1.34 |
+| Q4 (whale/big) | **+72.8 bps** | 60% | +4.67 |
+
+Mechanistic sense: a single large aggressive order piercing the range is Nagel's "urgent
+price-pressuring flow" that overshoots and reverts hardest (not the VPIN "informed flow continues"
+case, which is about *sustained* one-sided flow). Both spike dimensions point the same way — the
+more extreme the spike, the stronger the fade.
+
+**Status: promising, not adopted.** Restricting to Q4 ~triples per-trade edge (+27→+73 bps) but the
+holdout Sharpe only holds at baseline (fewer trades → noisier daily series). So it's a **conviction /
+sizing** signal (bet bigger on high-avg-trade-size spikes) more than a Sharpe lift, and it's a
+selected quartile — forward-test (as an arm or a size multiplier) before trusting it. First *new*
+lever in a while with a real, mechanistically-sensible gradient rather than a reversal/continuation rehash.
+
 ## Adoption discipline
 
 Every experiment carries a one-line hypothesis, an accept criterion (OOS-deflated Sharpe
