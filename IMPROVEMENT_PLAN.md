@@ -138,6 +138,16 @@ estimate), and the risk-adjusted optimum is clearly ~8h. A case where the OU heu
 combination is disciplined, not mining. This is a one-line universe change in `paper_bot.py`
 (`tier in ('HIGH','MID')` → `tier == 'MID'`).
 
+### Lead-lag (BTC leads alts) — RESULT (`analysis/lead_lag.py`) — REJECT (real but not tradeable)
+
+Trade the partial-adjustment gap: long alts that lagged BTC's move (gap = beta·r_btc − r_alt),
+short over-shooters, market-neutral, hold H bars. The effect is **real** — gross positive at every
+horizon (+1.8 to +5.1 bps/rebalance, gross Sharpe +4 to +9), laggards do catch up. But the edge is
+tiny with huge turnover (full decile basket every 1–6h): even 5 bps/rebalance kills 1–3h holds; 6h
+only breaks even (+0.07, holdout +2.76); 15 bps is deeply negative everywhere. Finer timeframes would
+worsen it (turnover cost, not signal, is the binding constraint). Same verdict as XS-momentum /
+stat-arb / carry: a genuine signal too thin to survive costs.
+
 ### Funding CARRY — RESULT (`analysis/carry.py`) — REJECT
 
 First test to count the funding *cashflow* as income (all prior tests were price-return only).
