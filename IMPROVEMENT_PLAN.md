@@ -244,6 +244,25 @@ sizing** signal (bet bigger on high-avg-trade-size spikes) more than a Sharpe li
 selected quartile — forward-test (as an arm or a size multiplier) before trusting it. First *new*
 lever in a while with a real, mechanistically-sensible gradient rather than a reversal/continuation rehash.
 
+**Full sized-equity backtest** (`analysis/ats_equity.py`, notional = 100·clip(ats/2, 0.5, 3.0),
+same breakout/HIGH+MID entries as flat):
+
+| metric | flat $100 | ats-sized |
+|---|---|---|
+| total P&L | +$660 | +$1038 |
+| daily $ Sharpe | +1.61 | +2.04 |
+| holdout Sharpe (45d) | +1.45 | +1.48 |
+| maxDD | −$298 | −$256 |
+| **return/\|maxDD\|** | 2.21 | **4.06** |
+| avg notional / peak margin | $100 / $2667 | $131 / $3506 |
+
+Sizing lifts Sharpe (1.61→2.04) and nearly doubles return/|maxDD| (2.21→4.06) with a *smaller*
+drawdown despite +31% capital — the up-sized (whale) trades were disproportionately winners, so the
+reweighting carries real information (a trade-specific reweight can't raise $ Sharpe otherwise). The
+45d holdout is flat (1.45→1.48), so it's **promising in-sample, unconfirmed OOS** — the live `15m-ats`
+arm is the test. Uses daily dollar-P&L Sharpe (portfolio-realistic), not comparable to the
+daily-mean-return Sharpe elsewhere; compare ats-vs-flat within this table only.
+
 ## Adoption discipline
 
 Every experiment carries a one-line hypothesis, an accept criterion (OOS-deflated Sharpe
