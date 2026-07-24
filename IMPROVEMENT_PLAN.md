@@ -138,6 +138,17 @@ estimate), and the risk-adjusted optimum is clearly ~8h. A case where the OU heu
 combination is disciplined, not mining. This is a one-line universe change in `paper_bot.py`
 (`tier in ('HIGH','MID')` → `tier == 'MID'`).
 
+### 24h % display-artifact roll-off — RESULT (`analysis/rolloff_24h.py`) — REJECT
+
+"Idiot edge": the candle exactly 24h ago rolls off the displayed 24h% window; big green rolling off
+makes 24h% drop (naive sell), big red makes it rise (naive buy). Traded cross-sectionally (long
+biggest-red-24h-ago / short biggest-green, hold H). Raw edge is tiny (+0.17 bps/hourly, ~half the
+thread's Binance claim) and dies on turnover cost (−25 Sharpe @5bp at 1h); only 24h-hold scrapes
++0.38 Sharpe @5bp. **Placebo kills it:** keying off the 12h-ago candle is *stronger* than the 24h-ago
+one at 3h/6h holds — so the whisper of edge is generic short-horizon reversal, NOT a 24h-specific
+display artifact. (Tested the public teaser mechanism; refined rules are paywalled. The 900%/4yr
+headline is full-position-size compounding, not a Sharpe.)
+
 ### Lead-lag (BTC leads alts) — RESULT (`analysis/lead_lag.py`) — REJECT (real but not tradeable)
 
 Trade the partial-adjustment gap: long alts that lagged BTC's move (gap = beta·r_btc − r_alt),
