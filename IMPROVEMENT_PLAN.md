@@ -149,6 +149,30 @@ one at 3h/6h holds — so the whisper of edge is generic short-horizon reversal,
 display artifact. (Tested the public teaser mechanism; refined rules are paywalled. The 900%/4yr
 headline is full-position-size compounding, not a Sharpe.)
 
+### 24h roll-off — REFINED (`analysis/refined_rolloff.py`) — real but sub-scale, NOT tradeable here
+
+Guessed the "refined" version and built it: (1) **leaderboard salience** — only trade coins whose
+*current* displayed 24h% is an extreme *caused by* the about-to-roll-off candle (sign(r_roll)==sign(disp)
+and |r_roll| ≥ share·|disp|); that is the exact ticker number retail watches move. (2) magnitude gate on
+the roll candle. (3) **orthogonalize r_roll vs the recent 6h return** to strip the generic reversal the
+naive placebo exposed. (4) short hold, precise roll timing.
+
+This is a materially better result than the naive one:
+- **Passes the placebo.** On the refined pipeline, lag=24 now *beats* lag=12 at 1h and 3h holds
+  (1h: annSh +1.88 vs −3.23; 3h: +1.22 vs −0.50). The salience gate isolated something genuinely
+  24h-specific — the ablation shows salience is the whole lever (gross 0.06 → 3.68 bps at 3h), magnitude
+  gate does nothing, orthogonalization trims gross slightly (honest, removes reversal).
+- **But it doesn't clear the economic bar.** Best config (3h hold, share≥0.8, dec 0.1) fires only ~145–244
+  times over 8mo (salience is rare), so annualizing on *actual* trade frequency (not the 3h grid) gives
+  gross Sharpe ~1.5 with a per-rebalance mean t-stat of only ~1.1 (**not significant**, need |t|>2).
+  Net Sharpe ~0.6–0.9 @3bp and ~0.3–0.6 @5bp; holdout unstable across configs (+5.9, −0.1, +4.5, −10.2
+  bps). Un-haircut for ~30 configs tried (Deflated-Sharpe would trim further).
+
+Verdict: the mechanism is **real and 24h-specific** (refinement rescued it from the naive placebo
+failure), but on Hyperliquid perps it's a ~0.5-Sharpe-net, statistically-insignificant whisper — too
+small and too noisy to deploy. Plausibly stronger on retail-heavy *spot* venues where the display-artifact
+audience is larger; this perp dataset doesn't support trading it.
+
 ### Lead-lag (BTC leads alts) — RESULT (`analysis/lead_lag.py`) — REJECT (real but not tradeable)
 
 Trade the partial-adjustment gap: long alts that lagged BTC's move (gap = beta·r_btc − r_alt),
