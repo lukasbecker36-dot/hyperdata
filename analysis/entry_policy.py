@@ -25,7 +25,8 @@ from datetime import datetime, timezone
 TRADES_GLOB = sys.argv[1] if len(sys.argv) > 1 else "live/*.csv"
 TAPE_GLOB   = "tape/tape_*.csv*"
 LOG_GLOB    = "{arm}/bot_*.log"
-WINDOWS     = [30, 60, 120, 300, 600, 900]
+WINDOWS     = ([int(x) for x in sys.argv[2].split(",")] if len(sys.argv) > 2
+               else [30, 60, 120, 300, 600, 900])
 WMAX_MS     = 900 * 1000
 STALE_MS    = 60 * 1000
 MAKER_BPS   = 1.5
