@@ -46,7 +46,7 @@ cannot withdraw, which is what you want on a server.
   python3 live_bot_ats.py --datadir ./live_15m_ats               # dry run
   python3 live_bot_ats.py --datadir ./live_15m_ats --live        # arm it
 """
-import argparse, csv, json, os, time
+import argparse, csv, json, os, time, urllib.request
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime, timezone
 
@@ -66,6 +66,29 @@ TAKER_SLIP     = 0.004    # IOC limit offset when crossing (0.4%) — a price ca
 MIN_NOTIONAL   = 10.0     # Hyperliquid perp minimum order value (USD)
 PERP_MAX_DEC   = 6        # MAX_DECIMALS for perps; px decimals <= PERP_MAX_DEC - szDecimals
 MAINNET        = "https://api.hyperliquid.xyz"
+
+
+def _patient_post(body, tries=8):
+    """paper_bot.hl_post with real backoff for HTTP 429.
+
+    Seven bots on this box (six paper arms + this one) all wake at bar close and
+    each fires ~180 candle requests, so the shared IP does get rate-limited. The
+    paper arms can afford to lose a cycle; this one is holding real positions, so
+    it waits the limiter out instead of aborting the cycle. Exponential, capped,
+    ~2 minutes total.
+    """
+    last = None
+    for a in range(tries):
+        try:
+            req = urllib.request.Request(MAINNET + "/info", data=json.dumps(body).encode(),
+                                        headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+        except Exception as e:
+            last = e
+            code = getattr(e, "code", None)
+            time.sleep(min(30.0, 2.0 ** a) if code == 429 else 1.0 * (a + 1))
+    raise last
 
 
 # ---------- tick / lot rounding ----------
@@ -143,6 +166,9 @@ class LiveBot(Bot):
 
     # ---------- exchange plumbing ----------
     def _connect(self):
+        # inherited market-data helpers call paper_bot.hl_post; give this process the
+        # patient 429 backoff. Process-local — the paper arms are unaffected.
+        paper_bot.hl_post = _patient_post
         addr = os.environ.get("HL_ACCOUNT_ADDRESS")
         secret = os.environ.get("HL_SECRET_KEY")
         if not addr:
@@ -172,17 +198,24 @@ class LiveBot(Bot):
             return None
 
     def exchange_positions(self):
-        """sym -> signed size, straight from the exchange. The only source of truth."""
-        out = {}
+        """sym -> signed size, straight from the exchange. The only source of truth.
+
+        Returns None if the QUERY FAILED. An empty dict means "genuinely flat", and
+        reconcile() must never confuse the two: on a transient 429 an empty dict would
+        look like every position had vanished, and we would drop real positions and
+        stop managing them. Fail closed instead.
+        """
         try:
+            out = {}
             for ap in self.info.user_state(self.address).get("assetPositions", []):
                 p = ap["position"]
                 szi = float(p["szi"])
                 if szi != 0:
                     out[p["coin"]] = szi
+            return out
         except Exception as e:
             self.log(f"WARN positions: {e}")
-        return out
+            return None
 
     def _set_leverage(self, sym):
         if sym in self.lev_set or not self.live:
@@ -502,6 +535,10 @@ class LiveBot(Bot):
         if not self.live:
             return
         live_pos = self.exchange_positions()
+        if live_pos is None:
+            # could not read the exchange; keep managing what we think we hold
+            self.log("RECONCILE skipped: exchange state unreadable (keeping local positions)")
+            return
         for sym in list(self.positions.keys()):
             # a just-filled position can lag in user_state; don't drop it on a race
             if (now_ms() - self.positions[sym]["entry_ms"]) < 120_000:
