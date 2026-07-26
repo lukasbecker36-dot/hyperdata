@@ -148,9 +148,17 @@ class LiveBot(Bot):
         self._connect()
 
     LIVE_COLS = ["fee_usd", "entry_wait_s", "exit_wait_s", "exit_taker", "repegs", "sz",
-                 "vpin30", "vpin60", "adverse_ofi"]
+                 "vpin30", "vpin60", "adverse_ofi",
+                 "queue_usd", "queue_ratio", "spread_bps"]
     MISS_COLS = ["time", "symbol", "side", "px", "sz", "rested_s", "vratio", "rv",
-                 "ats_ratio", "vpin30", "vpin60", "adverse_ofi"]
+                 "ats_ratio", "vpin30", "vpin60", "adverse_ofi",
+                 "queue_usd", "queue_ratio", "spread_bps"]
+
+    @staticmethod
+    def _q3(d):
+        """queue/spread fields as CSV-safe strings, in LIVE_COLS/MISS_COLS order."""
+        return [("" if d.get(k) is None else f"{d[k]:.4f}")
+                for k in ("queue_usd", "queue_ratio", "spread_bps")]
 
     @staticmethod
     def _extend_header(path, want):
@@ -324,6 +332,39 @@ class LiveBot(Bot):
             self.log(f"WARN fills {sym}: {e}")
             return None
 
+    # ---------- queue position (ported from provision_bot.py / mexc_api.py) ----------
+    def book(self, coin):
+        """Full L2 book in ONE call: (bid, ask, bids, asks) as [(px, sz), ...].
+
+        paper_bot.best_bid_ask() makes this same l2Book call and discards everything
+        but the touch, so queue depth costs no extra API calls.
+        """
+        b = paper_bot.hl_post({"type": "l2Book", "coin": coin})
+        lv = b.get("levels")
+        if not lv or len(lv) < 2 or not lv[0] or not lv[1]:
+            return None
+        bids = [(float(x["px"]), float(x["sz"])) for x in lv[0]]
+        asks = [(float(x["px"]), float(x["sz"])) for x in lv[1]]
+        return (bids[0][0], asks[0][0], bids, asks)
+
+    @staticmethod
+    def queue_ahead_usd(levels, px, is_sell):
+        """USD resting at or better than our price -- what must be consumed before we fill.
+
+        Ported from mexc_api.queue_ahead_usd, which provision_bot.py uses to answer the
+        question every offline fill study here has been unable to: a trade printing at
+        our price proves someone traded, not that WE were at the front of the queue.
+
+        Better-priced orders are hit first; orders AT our price were queued before us, so
+        both count. Deliberately conservative in the same way as the original: it ignores
+        cancellations (which help us) and new orders joining ahead (which hurt us).
+        """
+        tot = 0.0
+        for lpx, lsz in levels:
+            if (lpx <= px) if is_sell else (lpx >= px):
+                tot += lpx * lsz
+        return tot
+
     # ---------- flow toxicity (SHADOW ONLY -- logged, never acted on) ----------
     def load_tape_flow(self):
         """Read the tail of today's tape into per-coin, per-minute signed notional.
@@ -417,10 +458,10 @@ class LiveBot(Bot):
         if self.day_pnl <= -abs(self.daily_loss_limit):
             self.log(f"SKIP {sym}: daily loss limit hit (${self.day_pnl:+.2f})")
             return
-        ba = self.best_bid_ask(sym)
-        if ba is None:
+        bk = self.book(sym)
+        if bk is None:
             return
-        bid, ask = ba
+        bid, ask, bids, asks = bk
         is_buy = brk < 0                        # fade: down-breakout -> LONG
         raw_px = bid if is_buy else ask
         sd = self.sz_dec.get(sym, 2)
@@ -438,16 +479,22 @@ class LiveBot(Bot):
         if oid is None and fsz == 0:
             return
         tox = self.toxicity(sym, brk)          # shadow only: recorded, never gates
+        # queue ahead of us AT THE PRICE WE ACTUALLY REST AT (after tick rounding)
+        q_usd = self.queue_ahead_usd(asks if not is_buy else bids, px, not is_buy)
+        mid = 0.5 * (bid + ask)
         self.pending[sym] = {
             "oid": oid, "is_buy": is_buy, "px": px, "sz": sz, "filled": fsz,
             "placed_ms": now_ms(), "dir": 1 if is_buy else -1, "notional": notional,
             "mult": mult, "prior_h": feat["prior_h"], "prior_l": feat["prior_l"],
             "entry_bid": bid, "entry_ask": ask, "vratio": feat["vratio"],
             "rv": feat["rv"], "ats_ratio": feat.get("ats_ratio"), "tox": tox,
+            "queue_usd": q_usd, "queue_ratio": (q_usd / notional) if notional else None,
+            "spread_bps": ((ask - bid) / mid * 1e4) if mid > 0 else None,
         }
         self.log(f"PLACE {sym:12s} {'BUY ' if is_buy else 'SELL':4s} sz={sz} @ {px:.6g}  "
                  f"(vr={feat['vratio']:.1f}x rv={feat['rv']:.4f} size={mult:.1f}x "
-                 f"${notional:.0f})  resting up to {ENTRY_WINDOW_S}s")
+                 f"${notional:.0f})  queue=${q_usd:,.0f} ({q_usd/notional:.1f}x ours) "
+                 f"spread={(ask-bid)/mid*1e4:.1f}b  resting up to {ENTRY_WINDOW_S}s")
         self.notify(f"⏳ PLACE {'LONG' if is_buy else 'SHORT'} <b>{sym}</b> @ {px:.6g}\n"
                     f"size={mult:.1f}x (${notional:.0f})  vr={feat['vratio']:.1f}x")
 
@@ -462,6 +509,8 @@ class LiveBot(Bot):
             "entry_wait_s": round((now_ms() - pend["placed_ms"]) / 1000, 1),
             "fee_usd": self._fees_since(sym, pend["placed_ms"]) or 0.0,
             "tox": pend.get("tox", (None, None, None)),
+            "queue_usd": pend.get("queue_usd"), "queue_ratio": pend.get("queue_ratio"),
+            "spread_bps": pend.get("spread_bps"),
         }
         part = "" if abs(filled - pend["sz"]) < 1e-12 else f" PARTIAL {filled}/{pend['sz']}"
         self.log(f"OPEN  {sym:12s} {'LONG ' if pend['dir'] > 0 else 'SHORT':5s} @ {pend['px']:.6g}  "
@@ -482,8 +531,12 @@ class LiveBot(Bot):
                                     f"{pend['vratio']:.2f}", f"{pend['rv']:.6f}",
                                     "" if pend["ats_ratio"] is None else f"{pend['ats_ratio']:.2f}",
                                     *[("" if x is None else f"{x:.4f}")
-                                      for x in pend.get("tox", (None, None, None))]])
-        self.log(f"MISS  {sym:12s} unfilled after {rested}s @ {pend['px']:.6g} — signal abandoned")
+                                      for x in pend.get("tox", (None, None, None))],
+                                    *self._q3(pend)])
+        q = pend.get("queue_ratio")
+        self.log(f"MISS  {sym:12s} unfilled after {rested}s @ {pend['px']:.6g} — "
+                 f"signal abandoned (queue was {q:.1f}x ours)" if q is not None else
+                 f"MISS  {sym:12s} unfilled after {rested}s @ {pend['px']:.6g} — abandoned")
         self.notify(f"⚪ MISS <b>{sym}</b> — no fill in {rested}s, skipped")
 
     # ---------- exit ----------
@@ -579,7 +632,8 @@ class LiveBot(Bot):
                 round((now_ms() - ex.get("started_ms", now_ms())) / 1000, 1),
                 int(taker), ex.get("repegs", 0), sz,
                 *[("" if x is None else f"{x:.4f}")
-                  for x in p.get("tox", (None, None, None))]])
+                  for x in p.get("tox", (None, None, None))],
+                *self._q3(p)])
         self.log(f"CLOSE {sym:12s} {reason:14s} net={net*1e4:+6.1f}bps pnl=${pnl:+.3f} "
                  f"fee=${fee_usd:.3f} hold={hold_h:.1f}h  cum=${self.cum_pnl:+.2f} "
                  f"day=${self.day_pnl:+.2f} trades={self.n_closed}")
