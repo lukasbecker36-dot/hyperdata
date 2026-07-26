@@ -120,6 +120,7 @@ class LiveBot(Bot):
         self.pending = {}        # sym -> pending ENTRY order
         self.exiting = {}        # sym -> pending EXIT order state
         self.sz_dec = {}         # sym -> szDecimals
+        self.max_lev = {}        # sym -> exchange max leverage (128 perps cap at 3x)
         self.lev_set = set()
         self.day_pnl = 0.0
         self.day = datetime.now(timezone.utc).date()
@@ -160,6 +161,8 @@ class LiveBot(Bot):
         self.info = Info(MAINNET, skip_ws=True)
         for a in self.info.meta()["universe"]:
             self.sz_dec[a["name"]] = int(a["szDecimals"])
+            if a.get("maxLeverage"):
+                self.max_lev[a["name"]] = int(a["maxLeverage"])
         self.ex = None
         if self.live:
             if not secret:
@@ -200,13 +203,35 @@ class LiveBot(Bot):
             return None
 
     def _set_leverage(self, sym):
-        if sym in self.lev_set or not self.live:
-            return
-        try:
-            self.ex.update_leverage(self.leverage, sym, is_cross=False)
-            self.lev_set.add(sym)
-        except Exception as e:
-            self.log(f"WARN leverage {sym}: {e}")
+        """Set isolated leverage. Returns True ONLY if the exchange confirmed it.
+
+        This is not best-effort, and the caller must not trade without it. If the call
+        fails the coin silently keeps whatever leverage the account already had, which
+        can be much HIGHER than intended -- 35 perps allow 10x, one allows 40x. On a
+        strategy with no stop-loss and an 8h hold, that is the difference between
+        liquidating on a ~28% adverse move and a ~5% one.
+
+        Observed in production: a 429 on ONDO left it at a stale 2x. That direction was
+        harmless, but the same failure on a coin left at 10x would not have been.
+        """
+        if sym in self.lev_set:
+            return True
+        if not self.live:
+            return True
+        want = min(self.leverage, self.max_lev.get(sym, self.leverage))
+        for a in range(4):
+            try:
+                r = self.ex.update_leverage(want, sym, is_cross=False)
+                # a rejection comes back as {"status": "err"} WITHOUT raising, so the
+                # old try/except alone could not see it
+                if isinstance(r, dict) and r.get("status") == "ok":
+                    self.lev_set.add(sym)
+                    return True
+                self.log(f"WARN leverage {sym} rejected: {r}")
+            except Exception as e:
+                self.log(f"WARN leverage {sym} try {a+1}/4: {getattr(e, 'code', None) or e}")
+            time.sleep(min(15.0, 2.0 ** a))
+        return False
 
     def _place(self, sym, is_buy, sz, px, tif, reduce_only=False):
         """Return (oid, filled_sz, avg_px). oid None if nothing rests."""
@@ -304,7 +329,10 @@ class LiveBot(Bot):
             self.log(f"SKIP {sym}: unrepresentable or sub-minimum "
                      f"(px={px} sz={sz} ntl=${sz*px:.2f} < ${MIN_NOTIONAL})")
             return
-        self._set_leverage(sym)
+        if not self._set_leverage(sym):
+            # skipping one signal is cheap; an unknown-leverage no-stop position is not
+            self.log(f"SKIP {sym}: could not confirm {self.leverage}x isolated leverage")
+            return
         oid, fsz, fpx = self._place(sym, is_buy, sz, px, "Alo")
         if oid is None and fsz == 0:
             return
