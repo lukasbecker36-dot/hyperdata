@@ -64,6 +64,14 @@ EXIT_GRACE_S   = 600      # passive exit attempts for this long, then cross the 
 POLL_S         = 20       # order-management poll interval
 TAKER_SLIP     = 0.004    # IOC limit offset when crossing (0.4%) — a price cap, not a target
 MIN_NOTIONAL   = 10.0     # Hyperliquid perp minimum order value (USD)
+# --- flow-toxicity shadow logging (analysis/toxicity.py) ---
+# Recorded at signal time, NEVER acted on. The tape study found that dropping the most
+# toxic 20% of fills moved a broad spike population from -259 to +7518 total net bps,
+# but with t=0.6-1.1 and on a looser event set than this bot trades. So log it on real
+# fills until it is proven, then decide. Requires the tape logger writing to TAPE_DIR.
+TAPE_DIR       = "/opt/hyperdata/tape"
+TAPE_TAIL_MB   = 12       # tail of today's tape to read per cycle (~3h of prints)
+FLOW_MINS      = 60       # trailing window for vpin60 / adverse_ofi
 PERP_MAX_DEC   = 6        # MAX_DECIMALS for perps; px decimals <= PERP_MAX_DEC - szDecimals
 MAINNET        = "https://api.hyperliquid.xyz"
 
@@ -98,7 +106,8 @@ def round_sz(sz, sz_dec):
 
 class LiveBot(Bot):
     def __init__(self, datadir, live=False, notional=None, max_gross=1000.0,
-                 max_positions=10, daily_loss_limit=50.0, leverage=3, size_by_ats=True):
+                 max_positions=10, daily_loss_limit=50.0, leverage=3, size_by_ats=True,
+                 tape_dir=None):
         # 15m, HIGH+MID, breakout trigger. size_by_ats is the A/B knob: the tape says
         # whale-sizing is the worst of {inverse, flat, ats}, but on only 5 days and with
         # nothing significant, so run flat as a second live arm and let real fills decide.
@@ -125,27 +134,43 @@ class LiveBot(Bot):
         self.day_pnl = 0.0
         self.day = datetime.now(timezone.utc).date()
         self.kill_file = os.path.join(datadir, "KILL")
+        self.tape_dir = tape_dir or TAPE_DIR
+        self.flow = {}           # coin -> {minute: [buy_ntl, sell_ntl]}, shadow only
 
         # signals we abandoned because the entry never filled — the live fill-rate log
         self.miss_csv = os.path.join(datadir, "missed_15m_ats.csv")
         if not os.path.exists(self.miss_csv):
             with open(self.miss_csv, "w", newline="") as f:
-                csv.writer(f).writerow(["time", "symbol", "side", "px", "sz",
-                                        "rested_s", "vratio", "rv", "ats_ratio"])
+                csv.writer(f).writerow(self.MISS_COLS)
         # live-only columns appended after the paper schema so existing analysis
         # scripts (shadow_fill2.py, analysis/*) still parse this file unchanged
         self._ensure_live_cols()
         self._connect()
 
-    def _ensure_live_cols(self):
-        with open(self.trade_csv) as f:
-            hdr = f.readline().strip().split(",")
-        if "fee_usd" in hdr:
+    LIVE_COLS = ["fee_usd", "entry_wait_s", "exit_wait_s", "exit_taker", "repegs", "sz",
+                 "vpin30", "vpin60", "adverse_ofi"]
+    MISS_COLS = ["time", "symbol", "side", "px", "sz", "rested_s", "vratio", "rv",
+                 "ats_ratio", "vpin30", "vpin60", "adverse_ofi"]
+
+    @staticmethod
+    def _extend_header(path, want):
+        """Append any missing columns to an existing CSV header, idempotently.
+        Old rows keep fewer fields; DictReader fills them as None, which is fine."""
+        if not os.path.exists(path):
             return
-        rows = list(csv.reader(open(self.trade_csv)))
-        rows[0] += ["fee_usd", "entry_wait_s", "exit_wait_s", "exit_taker", "repegs", "sz"]
-        with open(self.trade_csv, "w", newline="") as f:
+        rows = list(csv.reader(open(path)))
+        if not rows:
+            return
+        missing = [c for c in want if c not in rows[0]]
+        if not missing:
+            return
+        rows[0] += missing
+        with open(path, "w", newline="") as f:
             csv.writer(f).writerows(rows)
+
+    def _ensure_live_cols(self):
+        self._extend_header(self.trade_csv, self.LIVE_COLS)
+        self._extend_header(self.miss_csv, self.MISS_COLS)
 
     # ---------- exchange plumbing ----------
     def _connect(self):
@@ -299,6 +324,82 @@ class LiveBot(Bot):
             self.log(f"WARN fills {sym}: {e}")
             return None
 
+    # ---------- flow toxicity (SHADOW ONLY -- logged, never acted on) ----------
+    def load_tape_flow(self):
+        """Read the tail of today's tape into per-coin, per-minute signed notional.
+
+        Once per cycle, not per signal -- the file is ~900k rows/day and this is disk
+        work inside the trading loop. Must never raise: an unavailable tape means the
+        toxicity columns are blank, not that trading stops.
+        """
+        self.flow = {}
+        try:
+            day = datetime.now(timezone.utc).strftime("%Y%m%d")
+            path = os.path.join(self.tape_dir, f"tape_{day}.csv")
+            if not os.path.exists(path):
+                return
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                if size > TAPE_TAIL_MB * 1024 * 1024:
+                    f.seek(size - TAPE_TAIL_MB * 1024 * 1024)
+                    f.readline()                       # discard the partial line
+                data = f.read().decode("utf-8", "replace")
+            cutoff = now_ms() - (FLOW_MINS + 5) * 60 * 1000
+            n = 0
+            for line in data.splitlines():
+                p = line.split(",")
+                if len(p) < 5:
+                    continue
+                try:
+                    t = int(p[0])
+                    if t < cutoff:
+                        continue
+                    ntl = float(p[3]) * float(p[4])
+                except ValueError:
+                    continue
+                d = self.flow.setdefault(p[1], {})
+                b = d.setdefault(t // 60000, [0.0, 0.0])
+                if p[2] == "B": b[0] += ntl
+                else:           b[1] += ntl
+                n += 1
+            self.log(f"tape flow: {n:,} prints, {len(self.flow)} coins "
+                     f"(last {FLOW_MINS}m, shadow only)")
+        except Exception as e:
+            self.flow = {}
+            self.log(f"WARN tape flow: {e}")
+
+    def toxicity(self, sym, brk):
+        """(vpin30, vpin60, adverse_ofi) or Nones. See analysis/toxicity.py.
+
+        vpin  = sum|buy-sell| / sum(buy+sell) over trailing minutes. Unsigned toxicity.
+        adverse_ofi = trailing OFI x breakout direction. We fade, so flow continuing in
+                      the breakout direction is flow running INTO our resting order.
+        """
+        try:
+            d = self.flow.get(sym)
+            if not d:
+                return (None, None, None)
+            now_m = now_ms() // 60000
+
+            def agg(mins):
+                num = den = signed = 0.0
+                seen = 0
+                for m in range(now_m - mins + 1, now_m + 1):
+                    v = d.get(m)
+                    if not v:
+                        continue
+                    num += abs(v[0] - v[1]); den += v[0] + v[1]
+                    signed += v[0] - v[1]; seen += 1
+                if den <= 0 or seen < max(3, mins // 6):
+                    return (None, None)
+                return (num / den, signed / den)
+
+            v30, _ = agg(30)
+            v60, ofi = agg(FLOW_MINS)
+            return (v30, v60, None if ofi is None else ofi * brk)
+        except Exception:
+            return (None, None, None)
+
     # ---------- entry ----------
     def open_pos(self, sym, brk, feat):
         """Place a post-only entry. Does NOT create a position — manage_pending() does,
@@ -336,12 +437,13 @@ class LiveBot(Bot):
         oid, fsz, fpx = self._place(sym, is_buy, sz, px, "Alo")
         if oid is None and fsz == 0:
             return
+        tox = self.toxicity(sym, brk)          # shadow only: recorded, never gates
         self.pending[sym] = {
             "oid": oid, "is_buy": is_buy, "px": px, "sz": sz, "filled": fsz,
             "placed_ms": now_ms(), "dir": 1 if is_buy else -1, "notional": notional,
             "mult": mult, "prior_h": feat["prior_h"], "prior_l": feat["prior_l"],
             "entry_bid": bid, "entry_ask": ask, "vratio": feat["vratio"],
-            "rv": feat["rv"], "ats_ratio": feat.get("ats_ratio"),
+            "rv": feat["rv"], "ats_ratio": feat.get("ats_ratio"), "tox": tox,
         }
         self.log(f"PLACE {sym:12s} {'BUY ' if is_buy else 'SELL':4s} sz={sz} @ {px:.6g}  "
                  f"(vr={feat['vratio']:.1f}x rv={feat['rv']:.4f} size={mult:.1f}x "
@@ -359,6 +461,7 @@ class LiveBot(Bot):
             "notional": notional, "sz": filled,
             "entry_wait_s": round((now_ms() - pend["placed_ms"]) / 1000, 1),
             "fee_usd": self._fees_since(sym, pend["placed_ms"]) or 0.0,
+            "tox": pend.get("tox", (None, None, None)),
         }
         part = "" if abs(filled - pend["sz"]) < 1e-12 else f" PARTIAL {filled}/{pend['sz']}"
         self.log(f"OPEN  {sym:12s} {'LONG ' if pend['dir'] > 0 else 'SHORT':5s} @ {pend['px']:.6g}  "
@@ -377,7 +480,9 @@ class LiveBot(Bot):
                                     "LONG" if pend["dir"] > 0 else "SHORT",
                                     f"{pend['px']:.8g}", pend["sz"], rested,
                                     f"{pend['vratio']:.2f}", f"{pend['rv']:.6f}",
-                                    "" if pend["ats_ratio"] is None else f"{pend['ats_ratio']:.2f}"])
+                                    "" if pend["ats_ratio"] is None else f"{pend['ats_ratio']:.2f}",
+                                    *[("" if x is None else f"{x:.4f}")
+                                      for x in pend.get("tox", (None, None, None))]])
         self.log(f"MISS  {sym:12s} unfilled after {rested}s @ {pend['px']:.6g} — signal abandoned")
         self.notify(f"⚪ MISS <b>{sym}</b> — no fill in {rested}s, skipped")
 
@@ -472,7 +577,9 @@ class LiveBot(Bot):
                 reason, p["entry_bid"], p["entry_ask"], ba[0], ba[1], f"{self.cum_pnl:.4f}",
                 f"{fee_usd:.4f}", p.get("entry_wait_s", ""),
                 round((now_ms() - ex.get("started_ms", now_ms())) / 1000, 1),
-                int(taker), ex.get("repegs", 0), sz])
+                int(taker), ex.get("repegs", 0), sz,
+                *[("" if x is None else f"{x:.4f}")
+                  for x in p.get("tox", (None, None, None))]])
         self.log(f"CLOSE {sym:12s} {reason:14s} net={net*1e4:+6.1f}bps pnl=${pnl:+.3f} "
                  f"fee=${fee_usd:.3f} hold={hold_h:.1f}h  cum=${self.cum_pnl:+.2f} "
                  f"day=${self.day_pnl:+.2f} trades={self.n_closed}")
@@ -571,6 +678,7 @@ class LiveBot(Bot):
     def cycle(self):
         """Bar-close pass: exits, then entries. Mirrors paper_bot.Bot.cycle()."""
         self.reconcile()
+        self.load_tape_flow()          # shadow toxicity features for this cycle's signals
         fsign = self.funding_signs()
         for sym in list(self.positions.keys()):
             if sym in self.exiting:
@@ -667,7 +775,13 @@ if __name__ == "__main__":
     ap.add_argument("--daily-loss-limit", type=float, default=50.0,
                     help="stop opening new positions once realized P&L today is below -X")
     ap.add_argument("--leverage", type=int, default=3, help="isolated leverage")
+    ap.add_argument("--flat-size", action="store_true",
+                    help="disable ats sizing (flat notional). The tape favours this; the "
+                         "arm's own 57 trades favour ats. Unresolved -- see analysis/sizing_ab.py")
+    ap.add_argument("--tape-dir", default=None,
+                    help=f"tape logger output dir, for shadow flow-toxicity logging "
+                         f"(default {TAPE_DIR}). Features are recorded, never acted on.")
     a = ap.parse_args()
     LiveBot(a.datadir, live=a.live, notional=a.notional, max_gross=a.max_gross,
             max_positions=a.max_positions, daily_loss_limit=a.daily_loss_limit,
-            leverage=a.leverage).run()
+            leverage=a.leverage, size_by_ats=not a.flat_size, tape_dir=a.tape_dir).run()
