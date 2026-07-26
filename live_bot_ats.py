@@ -46,7 +46,7 @@ cannot withdraw, which is what you want on a server.
   python3 live_bot_ats.py --datadir ./live_15m_ats               # dry run
   python3 live_bot_ats.py --datadir ./live_15m_ats --live        # arm it
 """
-import argparse, csv, json, os, time, urllib.request
+import argparse, csv, json, os, time
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime, timezone
 
@@ -66,29 +66,6 @@ TAKER_SLIP     = 0.004    # IOC limit offset when crossing (0.4%) — a price ca
 MIN_NOTIONAL   = 10.0     # Hyperliquid perp minimum order value (USD)
 PERP_MAX_DEC   = 6        # MAX_DECIMALS for perps; px decimals <= PERP_MAX_DEC - szDecimals
 MAINNET        = "https://api.hyperliquid.xyz"
-
-
-def _patient_post(body, tries=8):
-    """paper_bot.hl_post with real backoff for HTTP 429.
-
-    Seven bots on this box (six paper arms + this one) all wake at bar close and
-    each fires ~180 candle requests, so the shared IP does get rate-limited. The
-    paper arms can afford to lose a cycle; this one is holding real positions, so
-    it waits the limiter out instead of aborting the cycle. Exponential, capped,
-    ~2 minutes total.
-    """
-    last = None
-    for a in range(tries):
-        try:
-            req = urllib.request.Request(MAINNET + "/info", data=json.dumps(body).encode(),
-                                        headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                return json.load(r)
-        except Exception as e:
-            last = e
-            code = getattr(e, "code", None)
-            time.sleep(min(30.0, 2.0 ** a) if code == 429 else 1.0 * (a + 1))
-    raise last
 
 
 # ---------- tick / lot rounding ----------
@@ -166,9 +143,9 @@ class LiveBot(Bot):
 
     # ---------- exchange plumbing ----------
     def _connect(self):
-        # inherited market-data helpers call paper_bot.hl_post; give this process the
-        # patient 429 backoff. Process-local — the paper arms are unaffected.
-        paper_bot.hl_post = _patient_post
+        # market data comes via paper_bot.hl_post, which retries 429s with exponential
+        # backoff — important here, since aborting a cycle means an open position goes
+        # an extra 15 minutes without an exit check.
         addr = os.environ.get("HL_ACCOUNT_ADDRESS")
         secret = os.environ.get("HL_SECRET_KEY")
         if not addr:

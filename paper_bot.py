@@ -58,7 +58,15 @@ INTERVAL_MIN  = {"5m": 5, "15m": 15}
 POLL_OFFSET_S = 15           # seconds after bar close to poll (let candle settle)
 
 
-def hl_post(body, tries=5):
+def hl_post(body, tries=8):
+    """POST to /info, retrying. HTTP 429 gets exponential backoff (capped 30s).
+
+    Every arm on this host wakes at bar close and fires ~180 candle requests, so the
+    shared IP does get rate-limited (observed 1-6 times/day). The old flat 1s-per-retry
+    backoff was far too short to outlast a limiter window, so a 429 killed the whole
+    cycle -- losing that bar's entry signals AND its exit checks. Waiting it out costs
+    seconds; losing a cycle costs a trade.
+    """
     data = json.dumps(body).encode()
     last = None
     for a in range(tries):
@@ -68,7 +76,8 @@ def hl_post(body, tries=5):
                 return json.load(r)
         except Exception as e:
             last = e
-            time.sleep(1.0 * (a + 1))
+            code = getattr(e, "code", None)
+            time.sleep(min(30.0, 2.0 ** a) if code == 429 else 1.0 * (a + 1))
     raise last
 
 
@@ -463,7 +472,15 @@ if __name__ == "__main__":
                     help="entry trigger (Phase 3: 'bollinger' |z|>=2.5 beat the range-breakout OOS)")
     ap.add_argument("--size-by-ats", action="store_true",
                     help="scale notional by the spike's avg-trade-size ratio (whale-vs-crowd conviction)")
+    ap.add_argument("--poll-offset", type=int, default=None,
+                    help=f"seconds after bar close to start the cycle (default {POLL_OFFSET_S}). "
+                         "Stagger this across arms so they don't all hit the API at the same "
+                         "instant. Keep it small: the serial scan already spreads real order "
+                         "placement 20-200s past the bar, so offsets in that band change nothing "
+                         "material, but a large one would shift entry prices and delay reclaim "
+                         "exits, breaking comparability with the existing history.")
     a = ap.parse_args()
+    if a.poll_offset is not None: POLL_OFFSET_S = a.poll_offset
     if a.notional: NOTIONAL = a.notional
     if a.leverage is not None: LEVERAGE = a.leverage
     if a.maint_margin is not None: MAINT_MARGIN = a.maint_margin
