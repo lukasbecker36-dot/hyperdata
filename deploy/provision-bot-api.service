@@ -1,0 +1,18 @@
+[Unit]
+Description=MEXC dip-provision paper bot (apiAllowed subset only - the live-tradeable arm)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+EnvironmentFile=-/etc/hyperdata/telegram.env
+ExecStart=/usr/bin/python3 /opt/hyperdata/provision_bot.py --api-only --datadir /opt/hyperdata/paper_provision_api --label provision-api
+Restart=always
+RestartSec=15
+StandardOutput=append:/opt/hyperdata/paper_provision_api/service.out
+StandardError=append:/opt/hyperdata/paper_provision_api/service.err
+
+[Install]
+WantedBy=multi-user.target

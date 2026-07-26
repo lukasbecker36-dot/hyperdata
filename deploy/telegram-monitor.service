@@ -8,9 +8,13 @@ Type=simple
 User=hyper
 WorkingDirectory=/opt/hyperdata
 EnvironmentFile=/etc/hyperdata/telegram.env
-Environment=BOT_DATADIRS=5m:/opt/hyperdata/paper_5m,15m:/opt/hyperdata/paper_15m,15m:/opt/hyperdata/paper_15m_mid:15m-mid,15m:/opt/hyperdata/paper_15m_boll:15m-boll,15m:/opt/hyperdata/paper_15m_boll_mid:15m-boll-mid,15m:/opt/hyperdata/paper_15m_ats:15m-ats
+# LIVE-ats first so real money is the top line of /status, /positions and /trades
+Environment=BOT_DATADIRS=15m:/opt/hyperdata/live_15m_ats:LIVE-ats,5m:/opt/hyperdata/paper_5m,15m:/opt/hyperdata/paper_15m,15m:/opt/hyperdata/paper_15m_mid:15m-mid,15m:/opt/hyperdata/paper_15m_boll:15m-boll,15m:/opt/hyperdata/paper_15m_boll_mid:15m-boll-mid,15m:/opt/hyperdata/paper_15m_ats:15m-ats
 # /update knobs (defaults shown; override here if your paths differ)
 Environment=REPO_DIR=/opt/hyperdata
+# NOTE: live-bot-15m-ats is deliberately NOT in RESTART_UNITS. /update would restart it
+# mid-position, and a restart costs ~2.5min of recalibration during which open real
+# positions get no exit check. Restart the live arm by hand, when it is flat.
 Environment=RESTART_UNITS=paper-bot-5m paper-bot-15m paper-bot-15m-mid paper-bot-15m-boll paper-bot-15m-boll-mid paper-bot-15m-ats
 Environment=SYSTEMCTL=/usr/bin/systemctl
 ExecStart=/usr/bin/python3 /opt/hyperdata/telegram_monitor.py

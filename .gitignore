@@ -3,3 +3,13 @@ scratchpad/
 __pycache__/
 *.pyc
 live/
+
+# bot runtime state/output (regenerated; never commit)
+venv/
+tape/
+paper_5m/
+paper_15m*/
+paper_provision*/
+live_15m*/
+*.out
+*.err
