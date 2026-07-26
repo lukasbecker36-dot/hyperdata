@@ -159,3 +159,113 @@ done
   only counts a fill when a trade actually prints through the resting price (needs the WS trade feed).
 - Data is polled via REST each bar (~177 candle calls + 1 ctx call + a book call per fill). Well within
   Hyperliquid rate limits at 5m/15m cadence.
+
+---
+
+# Going live: `live_bot_ats.py` (REAL MONEY)
+
+`live_bot_ats.py` is the real-money version of the `15m-ats` arm — the only arm whose
+edge survived the shadow-fill audit (+$25.64 real vs +$39.70 booked over 57 trades).
+
+**Read this first.** The audit is the reason this script exists and the reason it is
+not just `paper_bot.py` with orders bolted on:
+
+| | paper arm | live bot |
+|---|---|---|
+| entry fill | instant at the touch, always | post-only, rests `ENTRY_WINDOW_S` (300s), **abandons the signal if unfilled** |
+| exit fill | instant at the touch, always | post-only + re-peg, then **crosses the spread** after `EXIT_GRACE_S` (600s) |
+| fees | assumed 1.5 bps/side | actual `fee` from `userFills` |
+| liquidation | modelled from intrabar excursion | whatever the exchange actually does; detected by reconcile |
+
+The tape says ~76% of entries and ~75% of exits would fill in 300s. So expect **fewer
+trades than the paper arm** (the misses are logged to `missed_15m_ats.csv`) and **worse
+per-trade P&L than the audited $25.64** — because the audit only priced unfilled *entries*,
+never the taker cost of an exit that won't fill passively. That cost is new and real.
+
+Strategy logic (`entry_ok`, `exit_reason`, `size_mult`, `features`, `calibrate`) is
+**imported from `paper_bot.Bot`**, so the live arm cannot drift from the measured arm.
+Only execution is overridden.
+
+## 1. Dependencies (first time this repo needs any)
+
+Everything up to now was stdlib + the public `/info` endpoint. Signing orders needs the SDK:
+
+```bash
+# as root
+python3 -m venv /opt/hyperdata/venv
+/opt/hyperdata/venv/bin/pip install hyperliquid-python-sdk    # pulls in eth-account
+chown -R hyper:hyper /opt/hyperdata/venv
+```
+
+## 2. Credentials — use an API wallet, never your main key
+
+Generate one at <https://app.hyperliquid.xyz/API>. An API wallet can trade but **cannot
+withdraw**, which is what you want sitting on a server.
+
+```bash
+mkdir -p /etc/hyperdata
+cat > /etc/hyperdata/live.env << 'ENV'
+HL_ACCOUNT_ADDRESS=0xYourMainAccountAddress
+HL_SECRET_KEY=0xYourApiWalletPrivateKey
+ENV
+chmod 600 /etc/hyperdata/live.env && chown root:root /etc/hyperdata/live.env
+```
+
+`HL_ACCOUNT_ADDRESS` is the account that holds the funds; `HL_SECRET_KEY` is the API
+wallet that signs for it. They are different addresses — that is expected.
+
+## 3. Dry run first (default — no `--live`, no orders)
+
+```bash
+sudo -u hyper env HL_ACCOUNT_ADDRESS=0x... \
+  /opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py --datadir /opt/hyperdata/live_15m_ats
+```
+
+Logs every order it *would* place. Note the dry run assumes the old optimistic instant
+fill so the full path (place → fill → hold → exit → book) is exercisable offline — **do
+not read dry-run P&L as an estimate of live P&L.** It is the number the audit disproved.
+
+## 4. Arm it
+
+```bash
+cp /opt/hyperdata/deploy/live-bot-15m-ats.service /etc/systemd/system/
+mkdir -p /opt/hyperdata/live_15m_ats && chown -R hyper:hyper /opt/hyperdata/live_15m_ats
+systemctl daemon-reload && systemctl enable --now live-bot-15m-ats
+journalctl -u live-bot-15m-ats -f
+```
+
+Start small. The unit ships `--notional 100 --max-gross 1000 --max-positions 10
+--daily-loss-limit 50`. With ats sizing, per-trade notional ranges $50–$300 (0.5–3.0×).
+
+## 5. Safety rails
+
+- **Dry run is the default.** Real orders require `--live`.
+- `--max-gross` — cap on total open notional. `--max-positions` — concurrency cap (10, vs
+  the paper arm's 40, because real margin is finite).
+- `--daily-loss-limit` — stops *opening* new positions once today's realized P&L is below
+  `-X`. Does not force-close what is open.
+- **Kill switch:** `touch /opt/hyperdata/live_15m_ats/KILL` → cancels all resting orders,
+  crosses out of every position at market, exits. Delete the file before restarting.
+- **Reconcile** runs each bar: the exchange is the source of truth. A position that vanished
+  (liquidation, manual close) is dropped with a loud warning and its P&L is *not* booked —
+  go read your fills. A position the bot doesn't recognise is **not** adopted, only flagged.
+- Isolated leverage is set per coin (`--leverage`, default 3×) to match the paper arm.
+- Sub-$10 orders are skipped (exchange minimum).
+
+## 6. Watching it
+
+```bash
+tail -f /opt/hyperdata/live_15m_ats/bot_15m.log
+column -s, -t /opt/hyperdata/live_15m_ats/trades_15m.csv | less -S
+column -s, -t /opt/hyperdata/live_15m_ats/missed_15m_ats.csv | less -S   # the fill-rate truth
+```
+
+`trades_15m.csv` keeps the paper schema (so `shadow_fill2.py` and `analysis/*` still parse it)
+and appends `fee_usd, entry_wait_s, exit_wait_s, exit_taker, repegs, sz`.
+
+**The first thing to check after a few days:** the live fill rate. Count rows in
+`missed_15m_ats.csv` against fills in `trades_15m.csv` — if entries fill at ~76%, the tape
+audit was calibrated correctly and the real edge estimate holds. If it's much lower, the
+audit was optimistic and the arm needs re-judging before any size increase. Also watch
+`exit_taker` — every `1` is an exit that paid the spread, a cost no backtest or paper arm
+ever charged.

@@ -1,0 +1,28 @@
+[Unit]
+Description=Hyperliquid fade LIVE bot (15m, avg-trade-size sizing) — REAL MONEY
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+EnvironmentFile=-/etc/hyperdata/telegram.env
+# HL_ACCOUNT_ADDRESS + HL_SECRET_KEY (API wallet). Must be root-owned, chmod 600.
+EnvironmentFile=/etc/hyperdata/live.env
+# NOTE: --live is what arms real orders. Drop it for a dry run.
+# Caps are deliberately small; raise them only after the live fill rate is measured.
+ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
+    --datadir /opt/hyperdata/live_15m_ats \
+    --live \
+    --notional 25 \
+    --max-gross 250 \
+    --max-positions 5 \
+    --daily-loss-limit 15
+Restart=always
+RestartSec=15
+StandardOutput=append:/opt/hyperdata/live_15m_ats/service.out
+StandardError=append:/opt/hyperdata/live_15m_ats/service.err
+
+[Install]
+WantedBy=multi-user.target

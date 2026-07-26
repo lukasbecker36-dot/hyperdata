@@ -243,6 +243,40 @@ class Bot:
         return {"close": c[i], "close_ms": closed[i]["T"], "prior_h": prior_h, "prior_l": prior_l,
                 "ma": ma, "z": z, "vratio": vratio, "rv": rv, "brk": brk, "ats_ratio": ats_ratio}
 
+    # ---------- strategy predicates ----------
+    # These three are the entire strategy surface: what to enter, when to exit, how big.
+    # live_bot_ats.py imports them so the real-money arm cannot drift from the paper arm.
+    def entry_ok(self, feat, fsign, sym):
+        """Entry gates 1-4. Gate 5 (liquidity tier) is applied by the caller."""
+        if feat is None:
+            return False
+        if feat["vratio"] < VOL_MULT or feat["brk"] == 0:
+            return False
+        if feat["rv"] < self.rv_thr:
+            return False
+        if feat["brk"] * fsign.get(sym, 0) != 1:       # crowd-aligned
+            return False
+        return True
+
+    def exit_reason(self, p, feat):
+        """'reclaim' (price back inside range / band), 'backstop' (8h), or None."""
+        if feat is not None:
+            if self.trigger == "bollinger":
+                if p["dir"] < 0 and feat["z"] < BOLL_K: return "reclaim"
+                if p["dir"] > 0 and feat["z"] > -BOLL_K: return "reclaim"
+            else:
+                if p["dir"] < 0 and feat["close"] < p["prior_h"]: return "reclaim"
+                if p["dir"] > 0 and feat["close"] > p["prior_l"]: return "reclaim"
+        if now_ms() - p["entry_ms"] >= self.backstop_ms:
+            return "backstop"
+        return None
+
+    def size_mult(self, feat):
+        """avg-trade-size sizing: big-trade ('whale') spikes fade harder -> bet more."""
+        if self.size_by_ats and feat.get("ats_ratio"):
+            return min(SIZE_MAX, max(SIZE_MIN, feat["ats_ratio"] / SIZE_REF))
+        return 1.0
+
     # ---------- calibration ----------
     def calibrate(self):
         self.log(f"calibrating rv threshold from last {CALIB_DAYS}d ...")
@@ -284,10 +318,7 @@ class Bot:
             d, entry = -1, ask
         else:             # down-breakout -> fade LONG -> buy at bid (maker)
             d, entry = 1, bid
-        # avg-trade-size sizing: scale notional up on big-trade ("whale") spikes
-        mult = 1.0
-        if self.size_by_ats and feat.get("ats_ratio"):
-            mult = min(SIZE_MAX, max(SIZE_MIN, feat["ats_ratio"] / SIZE_REF))
+        mult = self.size_mult(feat)
         notional = NOTIONAL * mult
         self.positions[sym] = {"dir": d, "entry_px": entry, "entry_ms": feat["close_ms"],
                                "prior_h": feat["prior_h"], "prior_l": feat["prior_l"],
@@ -365,17 +396,7 @@ class Bot:
                 try: self.close_pos(sym, "liquidation", forced_px=liq_px)
                 except Exception as e: self.log(f"WARN liq {sym}: {e}")
                 continue
-            reason = None
-            if feat is not None:
-                if self.trigger == "bollinger":
-                    # reclaim = z-score retreated back inside the band (mean-reversion underway)
-                    if p["dir"] < 0 and feat["z"] < BOLL_K: reason = "reclaim"
-                    elif p["dir"] > 0 and feat["z"] > -BOLL_K: reason = "reclaim"
-                else:
-                    if p["dir"] < 0 and feat["close"] < p["prior_h"]: reason = "reclaim"
-                    elif p["dir"] > 0 and feat["close"] > p["prior_l"]: reason = "reclaim"
-            if reason is None and now_ms() - p["entry_ms"] >= self.backstop_ms:
-                reason = "backstop"
+            reason = self.exit_reason(p, feat)
             if reason:
                 try: self.close_pos(sym, reason)
                 except Exception as e: self.log(f"WARN close {sym}: {e}")
@@ -389,10 +410,7 @@ class Bot:
                 feat = self.features(self.candles(sym, self.win + 5))
             except Exception:
                 continue
-            if feat is None: continue
-            if feat["vratio"] < VOL_MULT or feat["brk"] == 0: continue
-            if feat["rv"] < self.rv_thr: continue
-            if feat["brk"] * fsign.get(sym, 0) != 1: continue      # crowd-aligned
+            if not self.entry_ok(feat, fsign, sym): continue
             n_sig += 1
             try: self.open_pos(sym, feat["brk"], feat)
             except Exception as e: self.log(f"WARN open {sym}: {e}")
