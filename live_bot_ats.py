@@ -98,10 +98,12 @@ def round_sz(sz, sz_dec):
 
 class LiveBot(Bot):
     def __init__(self, datadir, live=False, notional=None, max_gross=1000.0,
-                 max_positions=10, daily_loss_limit=50.0, leverage=3):
-        # the ats arm's config: 15m, HIGH+MID, breakout trigger, ats sizing
+                 max_positions=10, daily_loss_limit=50.0, leverage=3, size_by_ats=True):
+        # 15m, HIGH+MID, breakout trigger. size_by_ats is the A/B knob: the tape says
+        # whale-sizing is the worst of {inverse, flat, ats}, but on only 5 days and with
+        # nothing significant, so run flat as a second live arm and let real fills decide.
         super().__init__("15m", datadir, tiers=("HIGH", "MID"),
-                         trigger="breakout", size_by_ats=True)
+                         trigger="breakout", size_by_ats=size_by_ats)
         self.live = live
         self.max_gross = max_gross
         self.max_positions = max_positions
@@ -110,7 +112,10 @@ class LiveBot(Bot):
         if notional:
             paper_bot.NOTIONAL = notional
         self.notional = paper_bot.NOTIONAL
-        self.label = "LIVE-15m-ats" + ("" if live else "-dry")
+        # derive from the datadir so parallel arms are distinguishable in Telegram
+        base = os.path.basename(os.path.normpath(datadir))
+        self.label = ("LIVE-" + base.replace("live_", "", 1).replace("_", "-")
+                      + ("" if live else "-dry"))
 
         self.pending = {}        # sym -> pending ENTRY order
         self.exiting = {}        # sym -> pending EXIT order state
