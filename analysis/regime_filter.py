@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """Market-regime filter: does the fade work better when aligned with the trend?
 
+CONCLUSION (see commit history): NO USABLE FILTER HERE. Do not deploy any variant of this.
+The full-sample numbers look attractive and the aggregate survives a time split, but a
+per-month breakdown of the long-side filter shows the entire effect is ONE MONTH:
+  skip LONG when coin above its own 20dMA : total +4,435 bps, of which January is +3,683
+                                            (83%); ex-January +752 = +1.7% of baseline
+  skip LONG when BTC above its 20dMA      : total +3,858, January +3,734 (97%);
+                                            ex-January +124 = +0.3%, i.e. nothing
+The excluded group is only 44-78 trades over 186 days -- about 6-11 per month, with monthly
+n as low as 1 -- so monthly means are unestimable against 300+ bps of noise. The sign also
+flips in April and May. Aggregate-level reporting hid all of this; check concentration
+BEFORE recommending anything.
+
 Hypothesis to test: a DIP in an uptrend is more likely to bounce (so fade it long), and a
 SPIKE in a downtrend is more likely to fail (so fade it short). The opposite is equally
 plausible -- a spike in an uptrend could be a blow-off top -- so both directions are
