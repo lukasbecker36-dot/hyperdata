@@ -132,6 +132,7 @@ class LiveBot(Bot):
         self.max_lev = {}        # sym -> exchange max leverage (128 perps cap at 3x)
         self.lev_set = set()
         self.day_pnl = 0.0
+        self.n_capped = 0        # signals refused by the position/gross caps, per cycle
         self.day = datetime.now(timezone.utc).date()
         self.kill_file = os.path.join(datadir, "KILL")
         self.tape_dir = tape_dir or TAPE_DIR
@@ -448,11 +449,16 @@ class LiveBot(Bot):
         if sym in self.pending or sym in self.positions or sym in self.exiting:
             return
         if len(self.positions) + len(self.pending) >= self.max_positions:
+            # this used to return silently, so capacity-driven skips were invisible --
+            # 31 signals detected vs 27 placed with no record of why
+            self.n_capped += 1
+            self.log(f"SKIP {sym}: position cap ({self.max_positions}) full")
             return
         gross = sum(p["notional"] for p in self.positions.values())
         mult = self.size_mult(feat)
         notional = self.notional * mult
         if gross + notional > self.max_gross:
+            self.n_capped += 1
             self.log(f"SKIP {sym}: gross cap (${gross:.0f} + ${notional:.0f} > ${self.max_gross:.0f})")
             return
         if self.day_pnl <= -abs(self.daily_loss_limit):
@@ -749,6 +755,7 @@ class LiveBot(Bot):
                 except Exception as e:
                     self.log(f"WARN close {sym}: {e}")
         n_sig, last = 0, time.time()
+        self.n_capped = 0
         for sym, tier in self.universe.items():
             if tier not in self.tiers: continue
             if sym in self.positions or sym in self.pending or sym in self.exiting: continue
@@ -771,8 +778,9 @@ class LiveBot(Bot):
                 except Exception as e: self.log(f"WARN manage: {e}")
                 last = time.time()
         eq = self.equity()
+        cap = f", {self.n_capped} capped" if self.n_capped else ""
         self.log(f"cycle done: {n_sig} signals, {len(self.positions)} open, "
-                 f"{len(self.pending)} resting, cum=${self.cum_pnl:+.2f}, "
+                 f"{len(self.pending)} resting{cap}, cum=${self.cum_pnl:+.2f}, "
                  f"day=${self.day_pnl:+.2f}" + (f", equity=${eq:,.2f}" if eq else ""))
 
     def run(self):

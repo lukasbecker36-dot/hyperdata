@@ -12,6 +12,13 @@ EnvironmentFile=-/etc/hyperdata/telegram.env
 EnvironmentFile=/etc/hyperdata/live.env
 # NOTE: --live is what arms real orders. Drop it for a dry run.
 # Caps are deliberately small; raise them only after the live fill rate is measured.
+# Deliberately tight for the testing phase, against $710 of spot collateral at 3x.
+# 5 slots does bind -- pinned there 47% of the time, and 5 slots only sustains ~31
+# trades/day at the measured 3.8h average hold against ~41 signals/day, so signals
+# ARE being turned away. That is accepted on purpose: signals arrive in correlated
+# bursts (three same-direction longs fired 38s apart on one bar), and a low slot
+# count is a blunt but effective cap on how much one market move can load up.
+# Raise only alongside a per-side cap, and once the arm's live edge is established.
 ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --datadir /opt/hyperdata/live_15m_ats \
     --live \
