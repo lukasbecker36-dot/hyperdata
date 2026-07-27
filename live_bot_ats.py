@@ -64,6 +64,17 @@ EXIT_GRACE_S   = 600      # passive exit attempts for this long, then cross the 
 POLL_S         = 20       # order-management poll interval
 TAKER_SLIP     = 0.004    # IOC limit offset when crossing (0.4%) — a price cap, not a target
 MIN_NOTIONAL   = 10.0     # Hyperliquid perp minimum order value (USD)
+# Cross the spread immediately instead of resting when the spread is at or below this,
+# in bps of mid. 0 disables (always rest). See analysis/spread_gate.py: on 400 audited
+# trades this went +$59.39 -> +$73.63 (+24%) and lifted signals traded from 294 to 343.
+# 5 rather than the measured-best 8 because the gain is a broad plateau (+14.23 at 5,
+# +15.40 at 8) and it inverts above 8, so 5 sits further from the cliff.
+CROSS_SPREAD_BPS = 5.0
+# Slippage cap for a crossing ENTRY, bps beyond the far touch. Deliberately far tighter
+# than TAKER_SLIP (which is 40bps and exists for mandatory exits): the whole edge is ~45bps,
+# so a fill 40bps worse than intended would defeat the point. An entry is optional -- if the
+# book moved, taking no fill and losing the signal is strictly better than a bad fill.
+CROSS_CAP_BPS  = 10.0
 # --- flow-toxicity shadow logging (analysis/toxicity.py) ---
 # Recorded at signal time, NEVER acted on. The tape study found that dropping the most
 # toxic 20% of fills moved a broad spike population from -259 to +7518 total net bps,
@@ -150,16 +161,18 @@ class LiveBot(Bot):
 
     LIVE_COLS = ["fee_usd", "entry_wait_s", "exit_wait_s", "exit_taker", "repegs", "sz",
                  "vpin30", "vpin60", "adverse_ofi",
-                 "queue_usd", "queue_ratio", "spread_bps"]
+                 "queue_usd", "queue_ratio", "spread_bps", "crossed"]
     MISS_COLS = ["time", "symbol", "side", "px", "sz", "rested_s", "vratio", "rv",
                  "ats_ratio", "vpin30", "vpin60", "adverse_ofi",
-                 "queue_usd", "queue_ratio", "spread_bps"]
+                 "queue_usd", "queue_ratio", "spread_bps", "crossed"]
 
     @staticmethod
     def _q3(d):
-        """queue/spread fields as CSV-safe strings, in LIVE_COLS/MISS_COLS order."""
+        """queue/spread/crossed fields as CSV-safe strings, in LIVE_COLS order.
+        `crossed` is what lets the live data confirm or refute the 5bps threshold."""
         return [("" if d.get(k) is None else f"{d[k]:.4f}")
-                for k in ("queue_usd", "queue_ratio", "spread_bps")]
+                for k in ("queue_usd", "queue_ratio", "spread_bps")] + \
+               [str(int(d.get("crossed", 0)))]
 
     @staticmethod
     def _extend_header(path, want):
@@ -469,10 +482,21 @@ class LiveBot(Bot):
             return
         bid, ask, bids, asks = bk
         is_buy = brk < 0                        # fade: down-breakout -> LONG
-        raw_px = bid if is_buy else ask
         sd = self.sz_dec.get(sym, 2)
-        px = round_px(raw_px, sd, is_buy)
-        sz = round_sz(notional / px, sd)
+        mid = 0.5 * (bid + ask)
+        spread_bps = ((ask - bid) / mid * 1e4) if mid > 0 else None
+        # CHEAP-SPREAD CROSSING (analysis/spread_gate.py). Crossing costs the spread, so
+        # when the spread is small, buying a certain fill is worth it: ~26% of resting
+        # entries never fill, and those are the ones that moved in our favour immediately
+        # (+$0.313/trade net of spread AND taker fee, t=+2.7). When the spread is wide the
+        # cost exceeds what those misses are worth, and resting is right.
+        cross = (CROSS_SPREAD_BPS > 0 and spread_bps is not None
+                 and spread_bps <= CROSS_SPREAD_BPS)
+        # maker rests at the NEAR touch; taker takes the FAR side
+        near = bid if is_buy else ask
+        far = ask if is_buy else bid
+        px = round_px(far if cross else near, sd, is_buy)
+        sz = round_sz(notional / max(px, 1e-12), sd)
         if px <= 0 or sz <= 0 or sz * px < MIN_NOTIONAL:
             self.log(f"SKIP {sym}: unrepresentable or sub-minimum "
                      f"(px={px} sz={sz} ntl=${sz*px:.2f} < ${MIN_NOTIONAL})")
@@ -481,26 +505,48 @@ class LiveBot(Bot):
             # skipping one signal is cheap; an unknown-leverage no-stop position is not
             self.log(f"SKIP {sym}: could not confirm {self.leverage}x isolated leverage")
             return
+        tox = self.toxicity(sym, brk)          # shadow only: recorded, never gates
+        # queue ahead of us at the price we rest at. Meaningless when crossing (we are the
+        # aggressor), so record it only for maker placements.
+        q_usd = None if cross else self.queue_ahead_usd(
+            asks if not is_buy else bids, px, not is_buy)
+        base = {
+            "is_buy": is_buy, "px": px, "sz": sz, "placed_ms": now_ms(),
+            "dir": 1 if is_buy else -1, "notional": notional, "mult": mult,
+            "prior_h": feat["prior_h"], "prior_l": feat["prior_l"],
+            "entry_bid": bid, "entry_ask": ask, "vratio": feat["vratio"],
+            "rv": feat["rv"], "ats_ratio": feat.get("ats_ratio"), "tox": tox,
+            "queue_usd": q_usd, "spread_bps": spread_bps, "crossed": int(cross),
+            "queue_ratio": (q_usd / notional) if (q_usd is not None and notional) else None,
+        }
+
+        if cross:
+            # IOC with a slippage cap. Our size is far below the depth at the touch
+            # ($25-75 against $500-1,100 measured), so this fills at the touch without
+            # walking the book -- but the cap bounds the damage if the book moves.
+            s = CROSS_CAP_BPS / 1e4
+            cap = round_px(px * (1 + s) if is_buy else px * (1 - s), sd, not is_buy)
+            oid, fsz, fpx = self._place(sym, is_buy, sz, cap, "Ioc")
+            if fsz <= 0:
+                self.log(f"MISS  {sym:12s} crossing IOC got no fill @ cap {cap:.6g} "
+                         f"(spread was {spread_bps:.1f}b) — signal abandoned")
+                return
+            pend = dict(base, oid=oid, filled=fsz, px=fpx or px)
+            self.log(f"CROSS {sym:12s} {'BUY ' if is_buy else 'SELL':4s} sz={fsz} "
+                     f"@ {fpx or px:.6g}  (vr={feat['vratio']:.1f}x size={mult:.1f}x "
+                     f"${notional:.0f})  spread={spread_bps:.1f}b <= {CROSS_SPREAD_BPS}b "
+                     f"— took the far side for a certain fill")
+            self._promote(sym, pend, round_sz(fsz, sd))
+            return
+
         oid, fsz, fpx = self._place(sym, is_buy, sz, px, "Alo")
         if oid is None and fsz == 0:
             return
-        tox = self.toxicity(sym, brk)          # shadow only: recorded, never gates
-        # queue ahead of us AT THE PRICE WE ACTUALLY REST AT (after tick rounding)
-        q_usd = self.queue_ahead_usd(asks if not is_buy else bids, px, not is_buy)
-        mid = 0.5 * (bid + ask)
-        self.pending[sym] = {
-            "oid": oid, "is_buy": is_buy, "px": px, "sz": sz, "filled": fsz,
-            "placed_ms": now_ms(), "dir": 1 if is_buy else -1, "notional": notional,
-            "mult": mult, "prior_h": feat["prior_h"], "prior_l": feat["prior_l"],
-            "entry_bid": bid, "entry_ask": ask, "vratio": feat["vratio"],
-            "rv": feat["rv"], "ats_ratio": feat.get("ats_ratio"), "tox": tox,
-            "queue_usd": q_usd, "queue_ratio": (q_usd / notional) if notional else None,
-            "spread_bps": ((ask - bid) / mid * 1e4) if mid > 0 else None,
-        }
+        self.pending[sym] = dict(base, oid=oid, filled=fsz)
         self.log(f"PLACE {sym:12s} {'BUY ' if is_buy else 'SELL':4s} sz={sz} @ {px:.6g}  "
                  f"(vr={feat['vratio']:.1f}x rv={feat['rv']:.4f} size={mult:.1f}x "
                  f"${notional:.0f})  queue=${q_usd:,.0f} ({q_usd/notional:.1f}x ours) "
-                 f"spread={(ask-bid)/mid*1e4:.1f}b  resting up to {ENTRY_WINDOW_S}s")
+                 f"spread={spread_bps:.1f}b  resting up to {ENTRY_WINDOW_S}s")
         self.notify(f"⏳ PLACE {'LONG' if is_buy else 'SHORT'} <b>{sym}</b> @ {px:.6g}\n"
                     f"size={mult:.1f}x (${notional:.0f})  vr={feat['vratio']:.1f}x")
 
@@ -516,7 +562,7 @@ class LiveBot(Bot):
             "fee_usd": self._fees_since(sym, pend["placed_ms"]) or 0.0,
             "tox": pend.get("tox", (None, None, None)),
             "queue_usd": pend.get("queue_usd"), "queue_ratio": pend.get("queue_ratio"),
-            "spread_bps": pend.get("spread_bps"),
+            "spread_bps": pend.get("spread_bps"), "crossed": pend.get("crossed", 0),
         }
         part = "" if abs(filled - pend["sz"]) < 1e-12 else f" PARTIAL {filled}/{pend['sz']}"
         self.log(f"OPEN  {sym:12s} {'LONG ' if pend['dir'] > 0 else 'SHORT':5s} @ {pend['px']:.6g}  "
@@ -785,8 +831,9 @@ class LiveBot(Bot):
 
     def run(self):
         mode = "LIVE — REAL MONEY" if self.live else "DRY RUN"
+        xs = (f"cross<={CROSS_SPREAD_BPS:g}b" if CROSS_SPREAD_BPS > 0 else "cross=off")
         self.log(f"=== live bot [15m-ats] {mode} | notional=${self.notional} x(0.5-3.0) "
-                 f"lev={self.leverage}x isolated | entry_window={ENTRY_WINDOW_S}s "
+                 f"lev={self.leverage}x isolated | {xs} entry_window={ENTRY_WINDOW_S}s "
                  f"exit_grace={EXIT_GRACE_S}s | caps: {self.max_positions}pos "
                  f"${self.max_gross:.0f}gross ${self.daily_loss_limit:.0f}daily-loss ===")
         self.notify(f"\U0001F916 <b>{mode}</b> 15m-ats starting\n"
@@ -840,10 +887,16 @@ if __name__ == "__main__":
     ap.add_argument("--flat-size", action="store_true",
                     help="disable ats sizing (flat notional). The tape favours this; the "
                          "arm's own 57 trades favour ats. Unresolved -- see analysis/sizing_ab.py")
+    ap.add_argument("--cross-spread-bps", type=float, default=None,
+                    help=f"cross the spread instead of resting when the spread is at or "
+                         f"below this many bps (default {CROSS_SPREAD_BPS}; 0 = always "
+                         f"rest, the pre-2026-07-27 behaviour). See analysis/spread_gate.py")
     ap.add_argument("--tape-dir", default=None,
                     help=f"tape logger output dir, for shadow flow-toxicity logging "
                          f"(default {TAPE_DIR}). Features are recorded, never acted on.")
     a = ap.parse_args()
+    if a.cross_spread_bps is not None:
+        CROSS_SPREAD_BPS = a.cross_spread_bps
     LiveBot(a.datadir, live=a.live, notional=a.notional, max_gross=a.max_gross,
             max_positions=a.max_positions, daily_loss_limit=a.daily_loss_limit,
             leverage=a.leverage, size_by_ats=not a.flat_size, tape_dir=a.tape_dir).run()
