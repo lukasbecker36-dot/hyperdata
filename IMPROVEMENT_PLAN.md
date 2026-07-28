@@ -213,6 +213,29 @@ reason. If capital-constrained, size *all* entries down uniformly (preserves the
 rather than skipping the crowded ones — or accept you're dropping your best trades. `conc_cap.py`
 covers the peak-deployed-capital view of that.
 
+### Slot cap sizing — RESULT (`analysis/slot_sweep.py`) — the 5-slot cap throttles ~88% of the edge
+
+Follows the clustered-entry finding: since crowded bursts carry the edge, does the live 5-slot cap cost
+us? Swept the concurrency cap (total and per-side) at live sizing ($25 base, 3x → ~$8.3 margin/slot),
+pricing P&L, drawdown, peak margin, and the share of the clustered-4+ edge that survives:
+
+  TOTAL cap  5:  +$20  maxDD −58  ret/DD 0.35  peak 5   margin $42   clustered-edge kept **5%**
+  TOTAL cap 10:  +$55  maxDD −62  ret/DD 0.88  peak 10  margin $83   kept 15%
+  TOTAL cap 20:  +$69  maxDD −71  ret/DD 0.97  peak 20  margin $167  kept 35%
+  TOTAL cap ∞:  +$162  maxDD −77  ret/DD **2.10** peak 82 margin $683 kept 100%
+
+Two things jump out. (1) **maxDD is nearly flat across every cap** (−$53 to −$77): the drawdown is driven
+by bad individual trades/periods, *not* by concurrency stacking. So capping removes return without
+removing risk → **ret/DD is monotonically better uncapped** (2.10 vs ≤0.97 at any finite cap). There is
+no risk argument for the cap. (2) 5 slots captures only ~12% of total P&L and **5% of the clustered
+edge** — the strategy's expectancy *needs* to hold many concurrent positions through a burst (peak
+concurrency 82 on hold-to-backstop; lower live because reclaim frees slots faster).
+
+The binding constraint is **capital, not correlation.** Set slots from free margin: slots ≈
+free_margin / $8.3 (more for ats-3x names). A PER-SIDE cap beats a total cap at equal number (holds both
+legs through a burst: per-side 5 = +$45 vs total 5 = +$20). **Paper action:** uncap now (MAX_POSITIONS
+40+) — the 5-slot paper cap is understating live paper P&L by ~8x and should be lifted for free.
+
 ### HMM regime study — RESULT (`analysis/hmm_regime.py`) — diagnostic YES, optimization lever NO
 
 Fit a stdlib Gaussian HMM on a market-level observation series [BTC hourly return, log market-vol
