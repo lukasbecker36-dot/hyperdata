@@ -118,7 +118,7 @@ def round_sz(sz, sz_dec):
 class LiveBot(Bot):
     def __init__(self, datadir, live=False, notional=None, max_gross=1000.0,
                  max_positions=10, daily_loss_limit=50.0, leverage=3, size_by_ats=True,
-                 tape_dir=None):
+                 tape_dir=None, max_per_side=20):
         # 15m, HIGH+MID, breakout trigger. size_by_ats is the A/B knob: the tape says
         # whale-sizing is the worst of {inverse, flat, ats}, but on only 5 days and with
         # nothing significant, so run flat as a second live arm and let real fills decide.
@@ -127,6 +127,7 @@ class LiveBot(Bot):
         self.live = live
         self.max_gross = max_gross
         self.max_positions = max_positions
+        self.max_per_side = max_per_side
         self.daily_loss_limit = daily_loss_limit
         self.leverage = int(leverage)
         if notional:
@@ -466,6 +467,19 @@ class LiveBot(Bot):
             # 31 signals detected vs 27 placed with no record of why
             self.n_capped += 1
             self.log(f"SKIP {sym}: position cap ({self.max_positions}) full")
+            return
+        # Per-side cap: a runaway backstop, not a capacity limit. Signals arrive in
+        # correlated bursts -- one market-wide move filled every slot on every arm with
+        # LONGs, and three same-direction entries once fired 38s apart -- so a total
+        # position count does not bound directional exposure. Counts resting orders too,
+        # or a burst could blow through it before any of them fill.
+        side_dir = 1 if brk < 0 else -1              # fade: down-break -> LONG
+        n_side = sum(1 for p in list(self.positions.values()) + list(self.pending.values())
+                     if p.get("dir") == side_dir)
+        if n_side >= self.max_per_side:
+            self.n_capped += 1
+            self.log(f"SKIP {sym}: per-side cap ({self.max_per_side} "
+                     f"{'LONG' if side_dir > 0 else 'SHORT'}) full")
             return
         gross = sum(p["notional"] for p in self.positions.values())
         mult = self.size_mult(feat)
@@ -835,7 +849,8 @@ class LiveBot(Bot):
         self.log(f"=== live bot [15m-ats] {mode} | notional=${self.notional} x(0.5-3.0) "
                  f"lev={self.leverage}x isolated | {xs} entry_window={ENTRY_WINDOW_S}s "
                  f"exit_grace={EXIT_GRACE_S}s | caps: {self.max_positions}pos "
-                 f"${self.max_gross:.0f}gross ${self.daily_loss_limit:.0f}daily-loss ===")
+                 f"{self.max_per_side}/side ${self.max_gross:.0f}gross "
+                 f"${self.daily_loss_limit:.0f}daily-loss ===")
         self.notify(f"\U0001F916 <b>{mode}</b> 15m-ats starting\n"
                     f"resuming: cum=${self.cum_pnl:+.2f} open={len(self.positions)} "
                     f"closed={self.n_closed}")
@@ -880,7 +895,13 @@ if __name__ == "__main__":
                          f"(default {paper_bot.NOTIONAL})")
     ap.add_argument("--max-gross", type=float, default=1000.0,
                     help="cap on total open notional (USD)")
-    ap.add_argument("--max-positions", type=int, default=10)
+    ap.add_argument("--max-positions", type=int, default=10,
+                    help="total concurrent positions+resting orders. Set to 2x "
+                         "--max-per-side to make the per-side caps the binding limit.")
+    ap.add_argument("--max-per-side", type=int, default=20,
+                    help="max concurrent LONG or SHORT positions (default 20). A runaway "
+                         "backstop, not a capacity limit: signals arrive in correlated "
+                         "bursts, so a total count does not bound directional exposure.")
     ap.add_argument("--daily-loss-limit", type=float, default=50.0,
                     help="stop opening new positions once realized P&L today is below -X")
     ap.add_argument("--leverage", type=int, default=3, help="isolated leverage")
@@ -899,4 +920,5 @@ if __name__ == "__main__":
         CROSS_SPREAD_BPS = a.cross_spread_bps
     LiveBot(a.datadir, live=a.live, notional=a.notional, max_gross=a.max_gross,
             max_positions=a.max_positions, daily_loss_limit=a.daily_loss_limit,
-            leverage=a.leverage, size_by_ats=not a.flat_size, tape_dir=a.tape_dir).run()
+            leverage=a.leverage, size_by_ats=not a.flat_size, tape_dir=a.tape_dir,
+            max_per_side=a.max_per_side).run()

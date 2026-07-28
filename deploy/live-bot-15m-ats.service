@@ -12,19 +12,29 @@ EnvironmentFile=-/etc/hyperdata/telegram.env
 EnvironmentFile=/etc/hyperdata/live.env
 # NOTE: --live is what arms real orders. Drop it for a dry run.
 # Caps are deliberately small; raise them only after the live fill rate is measured.
-# Deliberately tight for the testing phase, against $710 of spot collateral at 3x.
-# 5 slots does bind -- pinned there 47% of the time, and 5 slots only sustains ~31
-# trades/day at the measured 3.8h average hold against ~41 signals/day, so signals
-# ARE being turned away. That is accepted on purpose: signals arrive in correlated
-# bursts (three same-direction longs fired 38s apart on one bar), and a low slot
-# count is a blunt but effective cap on how much one market move can load up.
-# Raise only alongside a per-side cap, and once the arm's live edge is established.
+# Total-count cap removed: 5 slots bound 47% of the time and only sustained ~31
+# trades/day at the measured 3.8h hold against ~41 signals/day. max-positions is now
+# 2x the per-side cap so it can never bind first.
+#
+# Directional exposure is bounded by --max-per-side instead, which is the risk that
+# actually exists: signals arrive in correlated bursts. One market-wide move recently
+# left EVERY position on EVERY arm long, and three same-direction entries once fired
+# 38s apart. A total count does not bound that; a per-side count does.
+#
+# Gross raised 250 -> 700 because it would otherwise be the real limit (at ~$32 average
+# notional, $250 caps out near 8 positions and the per-side cap would never fire).
+# $700 gross is ~$233 of margin at 3x isolated = 33% of the $710 collateral.
+#
+# --daily-loss-limit deliberately LEFT at 15. It is a loss brake, not a capacity cap,
+# and its job does not change because more positions are allowed. It will now bind more
+# often; raise it only if it is halting days that should have kept trading.
 ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --datadir /opt/hyperdata/live_15m_ats \
     --live \
     --notional 25 \
-    --max-gross 250 \
-    --max-positions 5 \
+    --max-gross 700 \
+    --max-positions 40 \
+    --max-per-side 20 \
     --daily-loss-limit 15
 Restart=always
 RestartSec=15
