@@ -236,6 +236,31 @@ free_margin / $8.3 (more for ats-3x names). A PER-SIDE cap beats a total cap at 
 legs through a burst: per-side 5 = +$45 vs total 5 = +$20). **Paper action:** uncap now (MAX_POSITIONS
 40+) — the 5-slot paper cap is understating live paper P&L by ~8x and should be lifted for free.
 
+### Live-accurate frontier — RESULT (`analysis/reclaim_frontier.py`) — the cap is a risk AMPLIFIER
+
+Re-ran with the *actual* live rules — ATS sizing ($25 base × 0.5–3×), reclaim exits, and 3× isolated
+liquidation — instead of flat $25 / hold-to-backstop. Avg hold falls to **5.2h** (54% reclaim, 45%
+backstop, 0.7% liq). The result is worse than the flat version and inverts the risk story:
+
+  TOTAL cap  5:  **−$70**  maxDD −157  ret/DD −0.45  peakMargin $104   clustered kept 19%
+  TOTAL cap 15:  −$5   maxDD −116  ret/DD −0.04  peakMargin $232   kept 52%
+  TOTAL cap 20:  +$8   maxDD −111  ret/DD  0.08  peakMargin $299   kept 60%
+  TOTAL cap ∞:  **+$94** maxDD **−107** ret/DD **0.88** peakMargin $864  kept 100%
+
+Under live rules the 5-slot cap makes the strategy **lose money**, and — critically — **maxDD is *larger*
+capped (−$157) than uncapped (−$107) despite deploying ~8× less capital.** The cap doesn't reduce risk,
+it concentrates it. Mechanism: reclaim makes **winners exit fast (<5h) and losers run to the 8h
+backstop**, so at any instant the slots are occupied by not-yet-reclaimed losers while fresh clustered
+*winners* are blocked — adverse selection of exactly which trades you skip (clu4+ kept only 19% at cap5).
+Breadth across the burst is the edge; a slot cap kills breadth and keeps the laggards.
+
+**Recommendation:** the correct lever is **per-name size, not slot count.** ret/DD (0.88) is a property of
+breadth and is invariant to per-name notional, so if capital-constrained, *shrink BASE* to fit more names
+(e.g. $10 base → peak margin ~$345, same ret/DD) rather than capping slots. Keep a high per-side cap
+(≥20) only as a runaway backstop. Paper: uncap immediately — the live paper arms are currently measuring
+a cap-clogged book that shows a loss where the real strategy is +$94. True worst-burst margin to run
+uncapped is ~$864 at $25 base/3× (rarely hit; avg concurrency ≪ 81 peak).
+
 ### HMM regime study — RESULT (`analysis/hmm_regime.py`) — diagnostic YES, optimization lever NO
 
 Fit a stdlib Gaussian HMM on a market-level observation series [BTC hourly return, log market-vol
