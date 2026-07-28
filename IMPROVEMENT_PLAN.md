@@ -183,6 +183,33 @@ only breaks even (+0.07, holdout +2.76); 15 bps is deeply negative everywhere. F
 worsen it (turnover cost, not signal, is the binding constraint). Same verdict as XS-momentum /
 stat-arb / carry: a genuine signal too thin to survive costs.
 
+### HMM regime study — RESULT (`analysis/hmm_regime.py`) — diagnostic YES, optimization lever NO
+
+Fit a stdlib Gaussian HMM on a market-level observation series [BTC hourly return, log market-vol
+index], then bucketed the strategy's *actual* signals by the regime knowable **at entry**. Two
+disciplines because regime conditioning here has been a single-month artifact before (946914b):
+causal **filtered** (forward-only) labels fit on the first half only, and a **month-by-month** gap test.
+
+- **Diagnostic (real, expected):** the fade is a high-volatility strategy. In-sample it is stark —
+  K=2 STRESS +46.0 bps/trade (t=3.81) vs CALM −10.3; K=3 HIGH-vol +72.6 (t=4.93) vs LOW −0.4 / MID −5.4.
+  All the P&L lives in the stress/high-vol state. This makes sense (a volume-exhaustion fade needs vol
+  to have something to revert) and it essentially **re-derives the rv≥60th-pct gate already in the
+  strategy** — not new alpha.
+- **Optimization lever (fails causally):** the clean in-sample edge does **not** survive forward-only
+  labeling. K=3 OOS collapses to LOW +17.4 / MID +21.5 / HIGH +16.9, all insignificant (t≈0.6–1.1) —
+  the t=4.9 HIGH-vol edge was Viterbi lookahead. K=2 OOS keeps a directional STRESS>CALM (+25.8 vs
+  +10.4) but neither is significant and the monthly gap flips hard in June-2026 (CALM +212.7 vs STRESS
+  −9.0, a −222 bps month). Better distributed than the retracted MA filter (positive gap in 6/8 months,
+  not one-month) but not monotone or significant enough to lever.
+- **Capital-efficiency math:** gating to STRESS-only OOS lifts per-trade net +18.9→+25.8 bps (+37%) but
+  drops ~45% of trades, so **total** OOS P&L falls (+190% vs +252% trading everything). You pay real
+  P&L for a per-trade improvement that isn't OOS-significant.
+
+Verdict: worth knowing (the edge is concentrated in high-vol regimes — a robustness fact, and a reason
+the deployed vol gate is right), **not** worth a new HMM regime-gating overlay. It re-derives the
+existing filter in-sample and adds no robust causal value beyond it. Same recurring lesson as the
+retracted MA regime filter.
+
 ### Funding CARRY — RESULT (`analysis/carry.py`) — REJECT
 
 First test to count the funding *cashflow* as income (all prior tests were price-return only).
