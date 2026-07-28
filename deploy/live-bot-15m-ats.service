@@ -21,9 +21,15 @@ EnvironmentFile=/etc/hyperdata/live.env
 # left EVERY position on EVERY arm long, and three same-direction entries once fired
 # 38s apart. A total count does not bound that; a per-side count does.
 #
-# Gross raised 250 -> 700 because it would otherwise be the real limit (at ~$32 average
-# notional, $250 caps out near 8 positions and the per-side cap would never fire).
-# $700 gross is ~$233 of margin at 3x isolated = 33% of the $710 collateral.
+# Gross 250 -> 2000. An artificial gross cap below the natural margin limit is the wrong
+# constraint: $250 topped out near 8 positions and $700 near 22, both far below the ~67
+# the collateral supports, so either would fire during exactly the clustered bursts that
+# carry the edge (+56.5bps clustered vs -19bps isolated, see analysis/cluster_entries.py).
+# $2,000 sits just under the natural ceiling ($712 spot x 3x = $2,138), leaving headroom
+# for funding and fees, so the real backstops are now MARGIN and the per-side cap.
+# Normal operation is nowhere near any of them: ~9 concurrent at ~$32 = 13% utilisation.
+# The trade being accepted is that a full book puts most of the collateral at risk at once;
+# isolated margin bounds the loss per position to its own margin.
 #
 # --daily-loss-limit deliberately LEFT at 15. It is a loss brake, not a capacity cap,
 # and its job does not change because more positions are allowed. It will now bind more
@@ -32,7 +38,7 @@ ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --datadir /opt/hyperdata/live_15m_ats \
     --live \
     --notional 25 \
-    --max-gross 700 \
+    --max-gross 2000 \
     --max-positions 40 \
     --max-per-side 20 \
     --daily-loss-limit 15
