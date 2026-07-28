@@ -183,6 +183,36 @@ only breaks even (+0.07, holdout +2.76); 15 bps is deeply negative everywhere. F
 worsen it (turnover cost, not signal, is the binding constraint). Same verdict as XS-momentum /
 stat-arb / carry: a genuine signal too thin to survive costs.
 
+### Clustered vs isolated entries — RESULT (`analysis/cluster_entries.py`) — clustering is the EDGE, do NOT cap
+
+Hypothesis: when a wide market move fires many same-side fades at once, those correlated entries are
+worse than isolated single entries, so a rate limit / mix cap would help. **The data says the exact
+opposite.** Bucketing baseline fade net by trailing same-side crowd (causal, knowable at entry):
+
+  same-side 1h crowd:  isolated(1) **−19.1 bps** (t=−1.0)  →  2: +31.1  →  3: +31.9  →  **4+: +56.5 (t=4.1)**
+
+The entire positive expectancy lives in the clustered entries; **isolated single breakouts have
+*negative* expectancy.** Same shape at 3h/6h windows and by directional imbalance (most-lopsided burst
+= most profitable). Mechanism: a synchronized multi-coin break IS the capitulation/exhaustion event
+that mean-reverts; a lone breakout while the rest of the market is calm is more likely real
+idiosyncratic news/trend, so the fade fails. This is the same fact the HMM found (edge lives in the
+high-vol/stress regime) — a cluster is the micro-signature of that regime.
+
+**Monthly-robust** (the test that retracted the MA filter): clustered beats isolated in **all 8 months**,
+gap +15.6 to +126.4 bps, never negative. Not a single-month artifact.
+
+Both proposed rules therefore *hurt*. A same-side rate limit (skip if ≥cap same-side entries in a
+trailing window) was tested at cap∈{2,3,4} × window∈{3,6,12}h: every variant is worse than baseline —
+cum $ falls from **+647 → +72 or below**, ret/DD from **2.10 → ≤0.33**, because you skip exactly the
+crowded entries that carry the edge. The tail improves only slightly (worst-48h −253 → ~−180) — a
+terrible trade for ~90% of the profit.
+
+Caveat for the legitimate underlying worry (correlated exposure stacking): the reason to bound a
+cluster is a **capital/margin** limit (can't fund N simultaneous $100 positions), **not** an edge
+reason. If capital-constrained, size *all* entries down uniformly (preserves the edge proportionally)
+rather than skipping the crowded ones — or accept you're dropping your best trades. `conc_cap.py`
+covers the peak-deployed-capital view of that.
+
 ### HMM regime study — RESULT (`analysis/hmm_regime.py`) — diagnostic YES, optimization lever NO
 
 Fit a stdlib Gaussian HMM on a market-level observation series [BTC hourly return, log market-vol
