@@ -51,7 +51,7 @@ from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime, timezone
 
 import paper_bot
-from paper_bot import Bot, now_ms, iso
+from paper_bot import Bot, now_ms, iso, SIZE_MIN, SIZE_MAX
 
 try:
     import telegram_notify as tg
@@ -167,7 +167,8 @@ class LiveBot(Bot):
 
     LIVE_COLS = ["fee_usd", "entry_wait_s", "exit_wait_s", "exit_taker", "repegs", "sz",
                  "vpin30", "vpin60", "adverse_ofi",
-                 "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier"]
+                 "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier",
+                 "ats_ratio"]
     MISS_COLS = ["time", "symbol", "side", "px", "sz", "rested_s", "vratio", "rv",
                  "ats_ratio", "vpin30", "vpin60", "adverse_ofi",
                  "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier"]
@@ -624,7 +625,7 @@ class LiveBot(Bot):
             "tox": pend.get("tox", (None, None, None)),
             "queue_usd": pend.get("queue_usd"), "queue_ratio": pend.get("queue_ratio"),
             "spread_bps": pend.get("spread_bps"), "crossed": pend.get("crossed", 0),
-            "tier": pend.get("tier"),
+            "tier": pend.get("tier"), "ats_ratio": pend.get("ats_ratio"),
             # kept so reconcile can cancel the entry order if this turns out to be a
             # phantom fill rather than a real position
             "oid": pend.get("oid"),
@@ -752,7 +753,8 @@ class LiveBot(Bot):
                 int(taker), ex.get("repegs", 0), sz,
                 *[("" if x is None else f"{x:.4f}")
                   for x in p.get("tox", (None, None, None))],
-                *self._q3(p)])
+                *self._q3(p),
+                ("" if p.get("ats_ratio") is None else f"{p['ats_ratio']:.4f}")])
         self.log(f"CLOSE {sym:12s} {reason:14s} net={net*1e4:+6.1f}bps pnl=${pnl:+.3f} "
                  f"fee=${fee_usd:.3f} hold={hold_h:.1f}h  cum=${self.cum_pnl:+.2f} "
                  f"day=${self.day_pnl:+.2f} trades={self.n_closed}")
@@ -914,7 +916,8 @@ class LiveBot(Bot):
     def run(self):
         mode = "LIVE — REAL MONEY" if self.live else "DRY RUN"
         xs = (f"cross<={CROSS_SPREAD_BPS:g}b" if CROSS_SPREAD_BPS > 0 else "cross=off")
-        self.log(f"=== live bot [15m-ats] {mode} | notional=${self.notional} x(0.5-3.0) "
+        szs = (f"x({SIZE_MIN:g}-{SIZE_MAX:g} ats)" if self.size_by_ats else "FLAT")
+        self.log(f"=== live bot [15m-ats] {mode} | notional=${self.notional} {szs} "
                  f"lev={self.leverage}x isolated | {xs} entry_window={ENTRY_WINDOW_S}s "
                  f"exit_grace={EXIT_GRACE_S}s | caps: {self.max_positions}pos "
                  f"{self.max_per_side}/side ${self.max_gross:.0f}gross "

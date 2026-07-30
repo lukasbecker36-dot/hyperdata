@@ -31,13 +31,23 @@ EnvironmentFile=/etc/hyperdata/live.env
 # The trade being accepted is that a full book puts most of the collateral at risk at once;
 # isolated margin bounds the loss per position to its own margin.
 #
+# FLAT sizing at $35. The ats multiplier has no measurable selection value on live fills:
+# corr(multiplier, net_bps) = -0.001, 95% CI [-0.112, +0.115] over 237 trades, and the
+# original backtest's own 45d holdout was flat (1.45 -> 1.48) with flat beating ats in 3
+# of 4 configs. $35 matches the current ats AVERAGE notional ($37.40), so this changes the
+# sizing RULE without also changing exposure -- one variable at a time. Deliberately not
+# $50: a full 40-position book at $50 needs 94% of collateral, which would reintroduce a
+# capacity ceiling via margin, the very thing removing the slot cap was meant to fix.
+# ats_ratio is still logged per trade so the hypothesis stays testable under flat sizing.
+#
 # --daily-loss-limit deliberately LEFT at 15. It is a loss brake, not a capacity cap,
 # and its job does not change because more positions are allowed. It will now bind more
 # often; raise it only if it is halting days that should have kept trading.
 ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --datadir /opt/hyperdata/live_15m_ats \
     --live \
-    --notional 25 \
+    --notional 35 \
+    --flat-size \
     --max-gross 2000 \
     --max-positions 40 \
     --max-per-side 20 \
