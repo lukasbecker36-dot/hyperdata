@@ -62,6 +62,11 @@ except Exception:
 ENTRY_WINDOW_S = 300      # how long an entry order rests before we abandon the signal
 EXIT_GRACE_S   = 600      # passive exit attempts for this long, then cross the spread
 POLL_S         = 20       # order-management poll interval
+# Do not ask the exchange about an order younger than this. orderStatus answers
+# {"status":"unknownOid"} until the order is indexed, and a reply with no order in it
+# cannot be distinguished from "nothing left to fill" without care. Waiting one poll
+# costs nothing; not waiting invented a MET position on 2026-07-30 that never existed.
+FILL_QUERY_MIN_S = 5
 TAKER_SLIP     = 0.004    # IOC limit offset when crossing (0.4%) — a price cap, not a target
 MIN_NOTIONAL   = 10.0     # Hyperliquid perp minimum order value (USD)
 # Cross the spread immediately instead of resting when the spread is at or below this,
@@ -305,6 +310,24 @@ class LiveBot(Bot):
         self.log(f"WARN order {sym} status: {st}")      # e.g. Alo would have crossed
         return (None, 0.0, None)
 
+    def _cancel_stray(self, sym):
+        """Cancel every open order this account has in `sym`.
+
+        Belt to the braces of cancelling a known oid: after a phantom fill the bot may not
+        hold the right id, and an order left resting is unmanaged exposure. Only ever
+        called for a symbol the bot has just decided it holds no position in.
+        """
+        if not self.live:
+            return
+        try:
+            for o in self.info.open_orders(self.address):
+                if o.get("coin") == sym:
+                    self.log(f"  cancelling stray {sym} order {o['oid']} "
+                             f"({o.get('side')} sz={o.get('sz')} @ {o.get('limitPx')})")
+                    self.ex.cancel(sym, o["oid"])
+        except Exception as e:
+            self.log(f"WARN stray-cancel {sym}: {e}")
+
     def _cancel(self, sym, oid):
         if not self.live or oid in (None, -1):
             return
@@ -325,16 +348,34 @@ class LiveBot(Bot):
             return (0.0, None)
         try:
             st = self.info.query_order_by_oid(self.address, oid)
-            o = st.get("order", {}).get("order", {})
-            rem = float(o.get("sz", 0))                 # sz is the REMAINING size
-            filled = max(0.0, want_sz - rem)
-            status = st.get("order", {}).get("status")
-            if status == "filled":
-                filled = want_sz
-            return (filled, None)
         except Exception as e:
             self.log(f"WARN query oid {sym}/{oid}: {e}")
             return (0.0, None)
+        # FAIL CLOSED. The exchange answers {"status": "unknownOid"} for an order it has
+        # not indexed yet, and there is no order object in that reply. The old code did
+        #     rem = float(st["order"]["order"].get("sz", 0))  ->  0 remaining
+        #     filled = want_sz - rem                          ->  a FULL FILL
+        # so any unreadable reply invented a position that never existed. That is what
+        # happened to MET on 2026-07-30: promoted 1.2s after placing, reconciled away 14
+        # minutes later as "vanished on exchange", with the real order still resting.
+        # Anything we cannot positively read as filled must be reported as UNFILLED.
+        if not isinstance(st, dict) or st.get("status") != "order":
+            self.log(f"WARN oid {sym}/{oid} unresolvable "
+                     f"({(st or {}).get('status')!r}) — treating as unfilled")
+            return (0.0, None)
+        inner = st.get("order") or {}
+        o = inner.get("order") or {}
+        if "sz" not in o:
+            self.log(f"WARN oid {sym}/{oid} reply has no size — treating as unfilled")
+            return (0.0, None)
+        try:
+            rem = float(o["sz"])                        # sz is the REMAINING size
+        except (TypeError, ValueError):
+            self.log(f"WARN oid {sym}/{oid} unparseable size {o.get('sz')!r}")
+            return (0.0, None)
+        if inner.get("status") == "filled":
+            return (want_sz, None)
+        return (max(0.0, want_sz - rem), None)
 
     def _fees_since(self, sym, since_ms):
         """Actual USD fees paid on this coin since a timestamp (live fees, not assumed)."""
@@ -577,6 +618,9 @@ class LiveBot(Bot):
             "tox": pend.get("tox", (None, None, None)),
             "queue_usd": pend.get("queue_usd"), "queue_ratio": pend.get("queue_ratio"),
             "spread_bps": pend.get("spread_bps"), "crossed": pend.get("crossed", 0),
+            # kept so reconcile can cancel the entry order if this turns out to be a
+            # phantom fill rather than a real position
+            "oid": pend.get("oid"),
         }
         part = "" if abs(filled - pend["sz"]) < 1e-12 else f" PARTIAL {filled}/{pend['sz']}"
         self.log(f"OPEN  {sym:12s} {'LONG ' if pend['dir'] > 0 else 'SHORT':5s} @ {pend['px']:.6g}  "
@@ -615,7 +659,8 @@ class LiveBot(Bot):
         # order_sz = size of the order currently resting, so a partial fill on a
         #            re-pegged order is never counted twice
         self.exiting[sym] = {"reason": reason, "started_ms": now_ms(), "oid": None,
-                             "px": None, "repegs": 0, "done": 0.0, "order_sz": 0.0}
+                             "px": None, "repegs": 0, "done": 0.0, "order_sz": 0.0,
+                             "order_ms": 0}
         self.log(f"EXIT  {sym:12s} {reason} — working passively (grace {EXIT_GRACE_S}s)")
         self._work_exit(sym)
 
@@ -663,6 +708,7 @@ class LiveBot(Bot):
                 return
         oid, fsz, fpx = self._place(sym, is_buy, remaining, px, "Alo", reduce_only=True)
         ex["oid"], ex["px"], ex["order_sz"] = oid, px, remaining
+        ex["order_ms"] = now_ms()
         if fsz > 0:
             ex["done"] = min(p["sz"], ex["done"] + fsz)
             self._book_exit(sym, fpx or px, taker=False)
@@ -713,9 +759,13 @@ class LiveBot(Bot):
     def manage_pending(self):
         for sym in list(self.pending.keys()):
             pend = self.pending[sym]
+            age = (now_ms() - pend["placed_ms"]) / 1000
+            if age < FILL_QUERY_MIN_S:
+                # too young to have been indexed; querying now is what produced the
+                # unknownOid race. Nothing is lost by waiting one poll.
+                continue
             filled, _ = self._filled_sz(sym, pend["oid"], pend["sz"])
             filled = max(filled, pend["filled"])
-            age = (now_ms() - pend["placed_ms"]) / 1000
             if filled >= pend["sz"] - 1e-12:
                 self.pending.pop(sym)
                 self._promote(sym, pend, pend["sz"])
@@ -734,6 +784,8 @@ class LiveBot(Bot):
                 continue
             try:
                 ex, p = self.exiting[sym], self.positions[sym]
+                if (now_ms() - ex.get("order_ms", 0)) / 1000 < FILL_QUERY_MIN_S:
+                    continue                     # same indexing race as entries
                 # fills on the CURRENTLY resting order only; ex["done"] holds the rest
                 cur, _ = self._filled_sz(sym, ex["oid"], ex["order_sz"])
                 if ex["done"] + cur >= p["sz"] - 1e-12:
@@ -782,9 +834,18 @@ class LiveBot(Bot):
                 continue
             if sym not in live_pos:
                 p = self.positions.pop(sym)
-                self.exiting.pop(sym, None)
-                self.log(f"RECONCILE {sym}: gone on exchange (liquidated or closed "
-                         f"externally) — dropping local position, P&L NOT booked")
+                ex = self.exiting.pop(sym, None)
+                # The position may be a phantom from a mis-read fill, in which case the
+                # ENTRY order is very likely still resting on the book. Cancel anything
+                # we still have an id for, or it lingers unmanaged (observed with MET).
+                for oid in (p.get("oid"), (ex or {}).get("oid")):
+                    if oid not in (None, -1):
+                        self.log(f"RECONCILE {sym}: cancelling still-resting order {oid}")
+                        self._cancel(sym, oid)
+                self._cancel_stray(sym)
+                self.log(f"RECONCILE {sym}: gone on exchange (liquidated, closed "
+                         f"externally, or never actually filled) — dropping local "
+                         f"position, P&L NOT booked")
                 self.notify(f"⚠️ RECONCILE <b>{sym}</b> vanished on exchange "
                             f"(liquidation?) — check your fills")
         for sym, szi in live_pos.items():
