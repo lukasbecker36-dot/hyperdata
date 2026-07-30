@@ -167,18 +167,23 @@ class LiveBot(Bot):
 
     LIVE_COLS = ["fee_usd", "entry_wait_s", "exit_wait_s", "exit_taker", "repegs", "sz",
                  "vpin30", "vpin60", "adverse_ofi",
-                 "queue_usd", "queue_ratio", "spread_bps", "crossed"]
+                 "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier"]
     MISS_COLS = ["time", "symbol", "side", "px", "sz", "rested_s", "vratio", "rv",
                  "ats_ratio", "vpin30", "vpin60", "adverse_ofi",
-                 "queue_usd", "queue_ratio", "spread_bps", "crossed"]
+                 "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier"]
 
     @staticmethod
     def _q3(d):
-        """queue/spread/crossed fields as CSV-safe strings, in LIVE_COLS order.
-        `crossed` is what lets the live data confirm or refute the 5bps threshold."""
+        """queue/spread/crossed/tier fields as CSV-safe strings, in LIVE_COLS order.
+
+        `crossed` lets live data confirm or refute the 5bps threshold. `tier` is the
+        bot's OWN tier at signal time -- reconstructing it afterwards from current
+        volumes is unreliable, since ~10% of names cross a tertile boundary within days
+        (19 of paper_15m's 180 trades classify as LOW today, in a HIGH+MID-only arm).
+        """
         return [("" if d.get(k) is None else f"{d[k]:.4f}")
                 for k in ("queue_usd", "queue_ratio", "spread_bps")] + \
-               [str(int(d.get("crossed", 0)))]
+               [str(int(d.get("crossed", 0))), str(d.get("tier") or "")]
 
     @staticmethod
     def _extend_header(path, want):
@@ -572,6 +577,7 @@ class LiveBot(Bot):
             "entry_bid": bid, "entry_ask": ask, "vratio": feat["vratio"],
             "rv": feat["rv"], "ats_ratio": feat.get("ats_ratio"), "tox": tox,
             "queue_usd": q_usd, "spread_bps": spread_bps, "crossed": int(cross),
+            "tier": self.universe.get(sym),
             "queue_ratio": (q_usd / notional) if (q_usd is not None and notional) else None,
         }
 
@@ -618,6 +624,7 @@ class LiveBot(Bot):
             "tox": pend.get("tox", (None, None, None)),
             "queue_usd": pend.get("queue_usd"), "queue_ratio": pend.get("queue_ratio"),
             "spread_bps": pend.get("spread_bps"), "crossed": pend.get("crossed", 0),
+            "tier": pend.get("tier"),
             # kept so reconcile can cancel the entry order if this turns out to be a
             # phantom fill rather than a real position
             "oid": pend.get("oid"),
