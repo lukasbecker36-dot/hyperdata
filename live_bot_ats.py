@@ -46,7 +46,7 @@ cannot withdraw, which is what you want on a server.
   python3 live_bot_ats.py --datadir ./live_15m_ats               # dry run
   python3 live_bot_ats.py --datadir ./live_15m_ats --live        # arm it
 """
-import argparse, csv, json, os, time
+import argparse, csv, json, math, os, time
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime, timezone
 
@@ -80,6 +80,15 @@ CROSS_SPREAD_BPS = 5.0
 # so a fill 40bps worse than intended would defeat the point. An entry is optional -- if the
 # book moved, taking no fill and losing the signal is strictly better than a bad fill.
 CROSS_CAP_BPS  = 10.0
+# Liquidation is this strategy's DE FACTO stop-loss -- there is no explicit one -- and at a
+# fixed 3x its tightness varies enormously by coin. Hyperliquid's maintenance margin is
+# ~1/(2*maxLeverage), so a 3x-max memecoin liquidates at ~16.7% while a 10x-max major
+# liquidates at ~28.3%. Combined with volatility the effective stop ranged from 1.3 sigma
+# of the 8h hold (CASHCAT, which duly liquidated for -$5.18) to 12.8 sigma (JUP). Cap
+# leverage per coin so the cushion is at least LIQ_SIGMA sigma. In isolated margin this
+# costs NO return -- leverage sets margin and liquidation distance, not bps -- so it is a
+# free risk fix, paid for only in margin, of which ~7% is typically used.
+LIQ_SIGMA      = 3.0
 # --- flow-toxicity shadow logging (analysis/toxicity.py) ---
 # Recorded at signal time, NEVER acted on. The tape study found that dropping the most
 # toxic 20% of fills moved a broad spike population from -259 to +7518 total net bps,
@@ -89,6 +98,7 @@ TAPE_DIR       = "/opt/hyperdata/tape"
 TAPE_TAIL_MB   = 12       # tail of today's tape to read per cycle (~3h of prints)
 FLOW_MINS      = 60       # trailing window for vpin60 / adverse_ofi
 PERP_MAX_DEC   = 6        # MAX_DECIMALS for perps; px decimals <= PERP_MAX_DEC - szDecimals
+BACKSTOP_BARS  = 32       # 8h at 15m -- the horizon a liquidation cushion must survive
 MAINNET        = "https://api.hyperliquid.xyz"
 
 
@@ -147,7 +157,7 @@ class LiveBot(Bot):
         self.exiting = {}        # sym -> pending EXIT order state
         self.sz_dec = {}         # sym -> szDecimals
         self.max_lev = {}        # sym -> exchange max leverage (128 perps cap at 3x)
-        self.lev_set = set()
+        self.lev_set = {}        # sym -> leverage confirmed on the exchange
         self.day_pnl = 0.0
         self.n_capped = 0        # signals refused by the position/gross caps, per cycle
         self.day = datetime.now(timezone.utc).date()
@@ -261,7 +271,26 @@ class LiveBot(Bot):
             self.log(f"WARN positions: {e}")
             return None
 
-    def _set_leverage(self, sym):
+    def _lev_for(self, sym, rv):
+        """Highest leverage (<= self.leverage) leaving a LIQ_SIGMA cushion over the hold.
+
+        cushion(L) = 1/L - maintenance   must be >= LIQ_SIGMA * sigma_hold
+        sigma_hold = rv * sqrt(backstop bars); maintenance ~ 1/(2*maxLeverage).
+        Floors rather than rounds: a cushion below target is the failure mode being fixed.
+        """
+        want = self.leverage
+        try:
+            if rv and rv > 0:
+                sigma = rv * math.sqrt(BACKSTOP_BARS)
+                maint = 1.0 / (2 * self.max_lev.get(sym, self.leverage))
+                room = LIQ_SIGMA * sigma + maint
+                if room > 0:
+                    want = min(want, int(1.0 / room))
+        except Exception:
+            pass
+        return max(1, want)
+
+    def _set_leverage(self, sym, rv=None):
         """Set isolated leverage. Returns True ONLY if the exchange confirmed it.
 
         This is not best-effort, and the caller must not trade without it. If the call
@@ -273,18 +302,22 @@ class LiveBot(Bot):
         Observed in production: a 429 on ONDO left it at a stale 2x. That direction was
         harmless, but the same failure on a coin left at 10x would not have been.
         """
-        if sym in self.lev_set:
+        want = self._lev_for(sym, rv)
+        if self.lev_set.get(sym) == want:
             return True
         if not self.live:
             return True
-        want = min(self.leverage, self.max_lev.get(sym, self.leverage))
+        want = min(want, self.max_lev.get(sym, self.leverage))
         for a in range(4):
             try:
                 r = self.ex.update_leverage(want, sym, is_cross=False)
                 # a rejection comes back as {"status": "err"} WITHOUT raising, so the
                 # old try/except alone could not see it
                 if isinstance(r, dict) and r.get("status") == "ok":
-                    self.lev_set.add(sym)
+                    if want != self.leverage:
+                        self.log(f"  {sym}: leverage capped to {want}x for a "
+                                 f"{LIQ_SIGMA:g}-sigma liquidation cushion")
+                    self.lev_set[sym] = want
                     return True
                 self.log(f"WARN leverage {sym} rejected: {r}")
             except Exception as e:
@@ -315,6 +348,55 @@ class LiveBot(Bot):
             return (f.get("oid"), float(f["totalSz"]), float(f["avgPx"]))
         self.log(f"WARN order {sym} status: {st}")      # e.g. Alo would have crossed
         return (None, 0.0, None)
+
+    def _book_from_fills(self, sym, p):
+        """Write a trade row for a position the exchange closed without us.
+
+        reconcile() used to drop these with 'P&L NOT booked', so a real loss never reached
+        cum_pnl -- a CASHCAT liquidation on 2026-08-05 cost -$5.18 and went unrecorded,
+        overstating reported P&L by that much. The exchange knows the answer: userFills
+        carries closedPnl and fee for the closing fill. Returns the booked dollars, or None
+        if no closing fill exists (which means the position was a phantom, not a real one).
+        """
+        try:
+            fills = self.info.user_fills_by_time(self.address, p["entry_ms"] - 1000)
+        except Exception as e:
+            self.log(f"WARN fills {sym} for booking: {e}")
+            return None
+        close = [f for f in fills if f.get("coin") == sym
+                 and "close" in str(f.get("dir", "")).lower()]
+        if not close:
+            return None
+        pnl = sum(float(f.get("closedPnl", 0)) for f in close)
+        fee = sum(float(f.get("fee", 0)) for f in close)
+        px = float(close[-1].get("px") or p["entry_px"])
+        liq = any("liquidat" in json.dumps(f).lower() for f in close)
+        reason = "liquidation" if liq else "closed_externally"
+        net_usd = pnl - fee
+        ntl = p.get("notional") or 0.0
+        net = (net_usd / ntl) if ntl else 0.0
+        gross = (pnl / ntl) if ntl else 0.0
+        self.cum_pnl += net_usd
+        self.day_pnl += net_usd
+        self.n_closed += 1
+        self.n_win += 1 if net_usd > 0 else 0
+        self.n_liq += 1 if liq else 0
+        hold_h = (now_ms() - p["entry_ms"]) / 3600000
+        with open(self.trade_csv, "a", newline="") as f:
+            csv.writer(f).writerow([
+                iso(now_ms()), sym, "SHORT" if p["dir"] < 0 else "LONG",
+                iso(p["entry_ms"]), f"{p['entry_px']:.8g}", f"{px:.8g}",
+                f"{hold_h:.2f}", f"{gross*1e4:.1f}", f"{fee/ntl*1e4 if ntl else 0:.1f}",
+                f"{net*1e4:.1f}", f"{net_usd:.4f}", reason,
+                p.get("entry_bid", ""), p.get("entry_ask", ""), "", "",
+                f"{self.cum_pnl:.4f}", f"{fee:.4f}", p.get("entry_wait_s", ""), "", 0, 0,
+                p.get("sz", ""), *[("" if x is None else f"{x:.4f}")
+                                   for x in p.get("tox", (None, None, None))],
+                *self._q3(p),
+                ("" if p.get("ats_ratio") is None else f"{p['ats_ratio']:.4f}")])
+        self.notify(f"{reason.upper()} <b>{sym}</b>\n booked ${net_usd:+.2f} (fee ${fee:.3f}) hold={hold_h:.1f}h\n cum=${self.cum_pnl:+.2f}")
+        self._save_state()
+        return net_usd
 
     def _cancel_stray(self, sym):
         """Cancel every open order this account has in `sym`.
@@ -562,7 +644,7 @@ class LiveBot(Bot):
             self.log(f"SKIP {sym}: unrepresentable or sub-minimum "
                      f"(px={px} sz={sz} ntl=${sz*px:.2f} < ${MIN_NOTIONAL})")
             return
-        if not self._set_leverage(sym):
+        if not self._set_leverage(sym, feat.get("rv")):
             # skipping one signal is cheap; an unknown-leverage no-stop position is not
             self.log(f"SKIP {sym}: could not confirm {self.leverage}x isolated leverage")
             return
@@ -852,9 +934,14 @@ class LiveBot(Bot):
                         self.log(f"RECONCILE {sym}: cancelling still-resting order {oid}")
                         self._cancel(sym, oid)
                 self._cancel_stray(sym)
-                self.log(f"RECONCILE {sym}: gone on exchange (liquidated, closed "
-                         f"externally, or never actually filled) — dropping local "
-                         f"position, P&L NOT booked")
+                booked = self._book_from_fills(sym, p)
+                if booked is None:
+                    self.log(f"RECONCILE {sym}: gone on exchange and no closing fill "
+                             f"found — never actually filled, nothing to book")
+                else:
+                    self.log(f"RECONCILE {sym}: closed on the exchange without us "
+                             f"(liquidation or external close) — booked ${booked:+.2f} "
+                             f"from userFills")
                 self.notify(f"⚠️ RECONCILE <b>{sym}</b> vanished on exchange "
                             f"(liquidation?) — check your fills")
         for sym, szi in live_pos.items():
