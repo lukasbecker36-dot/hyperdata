@@ -7,13 +7,33 @@ reported with its concentration: on this dataset headline aggregates have
 repeatedly turned out to be three trades. A cut whose top-3 share is near 100%
 is a story about three trades, not about the cut.
 
-  python3 analysis/live_review.py [trades.csv]
+Pass --adjusted to restate the one trade whose outcome was a LEVERAGE error rather than
+a strategy error. See ADJUST below; the reasoning is in cashcat_counterfactual.py.
+
+  python3 analysis/live_review.py [trades.csv] [--adjusted]
 """
 import csv, math, sys
 from collections import defaultdict
 from datetime import datetime
 
-PATH = sys.argv[1] if len(sys.argv) > 1 else "live_15m_ats/trades_15m.csv"
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+ADJUSTED = "--adjusted" in sys.argv
+PATH = args[0] if args else "live_15m_ats/trades_15m.csv"
+
+# Restatements for trades whose result came from a sizing bug the bot no longer has.
+# Leverage does not touch P&L except through liquidation -- notional is $35 at any
+# leverage -- so this can only ever apply to liquidations, and there has been one.
+#
+# CASHCAT 2026-08-04: liquidated at 3x. maxLeverage is 3, so maintenance is 1/6, and
+# because a short grows as it moves against you the trigger is 14.29%, not 16.67%. The
+# adverse move was 14.83% -- it cleared the trigger by half a percent. _lev_for() now
+# sizes CASHCAT at 1x, where liquidation needs +71.4% and the realised MAE was +18.1%.
+# Walking the real candles at 1x, it never reclaims and exits at the 8h backstop for
+# -1044.1bps. So $1.56 of the $5.20 was the design error; the other $3.65 the strategy
+# lost fair and square. Deleting the trade would credit the strategy with a position
+# that would still have been open and still bleeding.
+ADJUST = {("CASHCAT", "2026-08-04 23:16:28"): dict(net=-1044.1, pnl=-3.6482,
+                                                   reason="backstop", hold=8.0)}
 
 rows = []
 for r in csv.DictReader(open(PATH)):
@@ -36,6 +56,15 @@ for r in csv.DictReader(open(PATH)):
         pass
 rows.sort(key=lambda r: r["t"])
 N = len(rows)
+
+n_adj = 0
+if ADJUSTED:
+    for r in rows:
+        a = ADJUST.get((r["symbol"], r["entry_time"]))
+        if a:
+            r.update(a); n_adj += 1
+    print(f"*** ADJUSTED: {n_adj} trade(s) restated at the leverage the bot now uses.\n"
+          f"    This is a STRATEGY view. The money actually lost is the unadjusted book.\n")
 
 
 def st(v):
