@@ -951,6 +951,142 @@ class LiveBot(Bot):
                 self.notify(f"⚠️ RECONCILE unmanaged <b>{sym}</b> szi={szi}")
         self._save_state()
 
+    # ---------- adoption of orphaned positions (Telegram /adopt) ----------
+    # A maker entry can fill on the exchange AFTER our fill-detector times out and marks
+    # the signal MISS/skipped (see the SAGA case: filled at 18:4x, "no fill in 308.5s"
+    # skip, then reconcile flags it unmanaged). reconcile() deliberately does NOT adopt
+    # such positions — it only warns — so they sit with no exit management. These methods
+    # let a human trigger adoption on demand: rebuild a position record from exchange truth
+    # so the normal reclaim/backstop/liquidation exit path takes over.
+    def _positions_detail(self):
+        """sym -> {szi, entryPx} from the exchange, or None if the query failed."""
+        try:
+            out = {}
+            for ap in self.info.user_state(self.address).get("assetPositions", []):
+                p = ap["position"]
+                szi = float(p["szi"])
+                if szi != 0:
+                    out[p["coin"]] = {"szi": szi, "entryPx": float(p.get("entryPx") or 0.0)}
+            return out
+        except Exception as e:
+            self.log(f"WARN positions detail: {e}")
+            return None
+
+    def find_unmanaged(self):
+        """Exchange positions the bot is not already tracking (open, pending, or exiting).
+        Returns None if the exchange is unreadable (so callers can fail closed)."""
+        det = self._positions_detail()
+        if det is None:
+            return None
+        known = set(self.positions) | set(self.pending) | set(self.exiting)
+        return {s: d for s, d in det.items() if s not in known}
+
+    def _reconstruct_range(self, sym):
+        """Approximate the 24h breakout range for an already-open position from current
+        candles. The reclaim test needs prior_h/prior_l; for a recently-filled orphan the
+        current range is a close proxy for the range at entry."""
+        try:
+            feat = self.features(self.candles(sym, self.win + 5))
+            if feat:
+                return feat["prior_h"], feat["prior_l"]
+        except Exception as e:
+            self.log(f"WARN range {sym}: {e}")
+        return None
+
+    def _entry_time(self, sym):
+        """Best-effort entry timestamp: the most recent fill on this coin. Falls back to
+        None (caller uses now, which only delays the 8h backstop, never shortens it)."""
+        try:
+            fills = self.info.user_fills_by_time(self.address, now_ms() - 48 * 3600 * 1000) or []
+            ts = [int(f["time"]) for f in fills if f.get("coin") == sym]
+            if ts:
+                return max(ts)
+        except Exception as e:
+            self.log(f"WARN fills {sym}: {e}")
+        return None
+
+    def _adopt_one(self, sym, d):
+        """Build a managed position record from exchange truth. Returns True on success."""
+        szi = d["szi"]
+        entry_px = d["entryPx"]
+        if not entry_px or entry_px <= 0:
+            self.log(f"ADOPT {sym}: exchange gave no entry price — skipping")
+            return False
+        rng = self._reconstruct_range(sym)
+        if rng is None:
+            self.log(f"ADOPT {sym}: could not reconstruct 24h range (thin candles) — skipping")
+            return False
+        prior_h, prior_l = rng
+        dirn = 1 if szi > 0 else -1
+        sz = abs(szi)
+        entry_ms = self._entry_time(sym) or now_ms()
+        notional = sz * entry_px
+        # Every field the exit path (_work_exit/_book_exit/exit_reason) reads, with the
+        # analytics fields defaulted so no CSV write KeyErrors. entry_bid/ask are unknown
+        # historically -> set to entry_px (they only feed the trade-log columns, not P&L).
+        self.positions[sym] = {
+            "dir": dirn, "entry_px": entry_px, "entry_ms": entry_ms,
+            "prior_h": prior_h, "prior_l": prior_l,
+            "entry_bid": entry_px, "entry_ask": entry_px,
+            "notional": notional, "sz": sz,
+            "entry_wait_s": 0.0, "fee_usd": 0.0, "tox": (None, None, None),
+            "queue_usd": None, "queue_ratio": None, "spread_bps": None, "crossed": 0,
+            "adopted": True, "adopt_ms": now_ms(),
+        }
+        held_h = (now_ms() - entry_ms) / 3600000
+        self.log(f"ADOPT {sym}: {'LONG' if dirn > 0 else 'SHORT'} sz={sz} @ {entry_px:.6g} "
+                 f"(${notional:.0f}) range[{prior_l:.6g},{prior_h:.6g}] held~{held_h:.1f}h "
+                 f"-> now managed")
+        self.notify(f"\U0001FA79 ADOPTED {'LONG' if dirn > 0 else 'SHORT'} <b>{sym}</b> "
+                    f"@ {entry_px:.6g}\nsz={sz} (${notional:.0f})  held~{held_h:.1f}h "
+                    f"— will exit on reclaim/backstop/liquidation")
+        return True
+
+    def adopt_unmanaged(self):
+        """Find and adopt every exchange position the bot is not managing. Live only."""
+        if not self.live:
+            self.notify("adopt: this is a dry-run arm — no exchange positions to adopt")
+            return
+        un = self.find_unmanaged()
+        if un is None:
+            self.notify("⚠️ adopt: exchange positions unreadable right now — try again")
+            return
+        if not un:
+            self.notify("✅ adopt: nothing to do — every exchange position is already managed")
+            return
+        adopted, failed = [], []
+        for sym, d in un.items():
+            try:
+                (adopted if self._adopt_one(sym, d) else failed).append(sym)
+            except Exception as e:
+                self.log(f"ADOPT {sym} error: {e}")
+                failed.append(sym)
+        self._save_state()
+        parts = []
+        if adopted:
+            parts.append("\U0001F7E2 adopted " + ", ".join(adopted) + " — now managed for exit")
+        if failed:
+            parts.append("⚠️ could not adopt " + ", ".join(failed)
+                         + " (no candle range / no entry px yet — retry shortly)")
+        self.notify("\n".join(parts))
+
+    def check_adopt_request(self):
+        """Consume a /adopt request dropped by telegram_monitor. Cheap file poll; runs
+        every loop so adoption lands within POLL_S, not at the next bar."""
+        flag = os.path.join(self.datadir, "adopt_request.flag")
+        if not os.path.exists(flag):
+            return
+        try:
+            os.remove(flag)
+        except Exception:
+            pass
+        self.log("ADOPT request received (Telegram /adopt)")
+        try:
+            self.adopt_unmanaged()
+        except Exception as e:
+            self.log(f"ADOPT error: {e}")
+            self.notify(f"⚠️ adopt failed: {e}")
+
     # ---------- main loop ----------
     def cycle(self):
         """Bar-close pass: exits, then entries. Mirrors paper_bot.Bot.cycle()."""
@@ -1026,6 +1162,10 @@ class LiveBot(Bot):
                 self.manage_pending()
             except Exception as e:
                 self.log(f"ERROR manage: {e}")
+            try:
+                self.check_adopt_request()  # respond to a Telegram /adopt within POLL_S
+            except Exception as e:
+                self.log(f"ERROR adopt-check: {e}")
             if now_ms() >= next_eval:
                 t0 = time.time()
                 try:

@@ -4,15 +4,23 @@ Interactive Telegram monitor for the Hyperliquid paper bot(s).
 
 Runs as its own process (separate from trading, so it can never interfere with
 the loop). Long-polls Telegram for commands and answers by READING the bot's
-state/trades files — it never writes anything and never touches the exchange.
+state/trades files. It never touches the exchange; the only thing it ever writes
+is a small /adopt request flag in a live arm's datadir, which the live bot picks
+up and acts on (the monitor itself never mutates positions).
 
 Commands:
   /status      cum P&L, win rate, open count for every timeframe
   /pnl         same as /status (P&L focus)
   /positions   list of currently-open positions per timeframe
   /trades      last few closed trades per timeframe
+  /adopt       tell the live arm to adopt any exchange position it is not managing
+               (e.g. a maker entry that filled after the fill-detector timed out)
   /update      git pull + restart the bots (needs the sudoers rule, see DEPLOY §5)
   /help        this list
+
+Config (env) additions:
+  ADOPT_DATADIRS   optional "label:dir,..." override for which arms /adopt targets;
+                   defaults to BOT_DATADIRS entries whose label starts with "LIVE".
 
 Config (env):
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   (shared with the bot)
@@ -235,12 +243,62 @@ def cmd_update():
     return body
 
 
+def _live_targets():
+    """(label, datadir) for each LIVE arm to send an /adopt request to. From ADOPT_DATADIRS
+    ('label:dir,label:dir') if set, else every BOT_DATADIRS entry whose label starts 'LIVE'.
+    Paper arms are excluded: they have no exchange positions and never consume the flag."""
+    spec = os.environ.get("ADOPT_DATADIRS", "").strip()
+    out = []
+    if spec:
+        for part in spec.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            bits = part.split(":")
+            if len(bits) >= 2 and bits[1].strip():
+                out.append((bits[0].strip(), bits[1].strip()))
+            elif bits[0].strip():
+                out.append((os.path.basename(bits[0].strip()), bits[0].strip()))
+    else:
+        for _interval, d, label in _datadirs():
+            if d and label.upper().startswith("LIVE"):
+                out.append((label, d))
+    return out
+
+
+def cmd_adopt():
+    """Ask the live bot(s) to adopt any exchange position they are not managing.
+
+    The monitor only READS state and never touches the exchange, so it cannot adopt
+    directly (and injecting into the bot's state file would be overwritten on its next
+    save). Instead it drops a request flag in each live arm's datadir; the bot picks it up
+    within a few seconds, rebuilds the position from exchange truth, and reports here."""
+    targets = _live_targets()
+    if not targets:
+        return ("no live arms found. Set ADOPT_DATADIRS=\"LIVE-ats:/opt/hyperdata/live_15m_ats\" "
+                "on the telegram-monitor unit, or give the live arm a BOT_DATADIRS label "
+                "starting with 'LIVE'.")
+    done = []
+    for label, d in targets:
+        try:
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "adopt_request.flag"), "w") as f:
+                json.dump({"ts": int(time.time())}, f)
+            done.append(label)
+        except Exception as e:
+            done.append(f"{label} (FAILED: {e})")
+    return ("\U0001F527 adopt requested for: " + ", ".join(done) +
+            "\nEach live bot scans the exchange for unmanaged positions within a few seconds "
+            "and reports back here (or confirms it is flat).")
+
+
 HELP = (
     "<b>Hyperliquid paper bot monitor</b>\n"
     "/status — P&amp;L + win rate + open count\n"
     "/pnl — same as /status\n"
     "/positions — currently open positions\n"
     "/trades — last few closed trades\n"
+    "/adopt — adopt unmanaged exchange positions (live arm)\n"
     "/update — git pull + restart the bots\n"
     "/help — this message")
 
@@ -250,6 +308,7 @@ HANDLERS = {
     "/positions": cmd_positions,
     "/pos": cmd_positions,
     "/trades": cmd_trades,
+    "/adopt": cmd_adopt,
     "/update": cmd_update,
     "/help": lambda: HELP,
     "/start": lambda: HELP,
@@ -260,6 +319,7 @@ MENU = [
     ("status", "P&L, win rate, open count"),
     ("positions", "currently open positions"),
     ("trades", "last few closed trades"),
+    ("adopt", "adopt unmanaged exchange positions"),
     ("update", "git pull + restart the bots"),
     ("help", "list commands"),
 ]
