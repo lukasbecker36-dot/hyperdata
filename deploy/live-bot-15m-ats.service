@@ -40,6 +40,23 @@ EnvironmentFile=/etc/hyperdata/live.env
 # capacity ceiling via margin, the very thing removing the slot cap was meant to fix.
 # ats_ratio is still logged per trade so the hypothesis stays testable under flat sizing.
 #
+# --ab-rest-pct 0.5 runs a RANDOMISED experiment: half of all tight-spread signals are
+# forced to rest instead of crossing. Wide-spread signals are untouched.
+#
+# Why it is needed: wide-spread entries earn +93.2bps against +3.6bps for tight ones
+# (n=78 vs 152, t=+3.1), and that held on a clean 60-trade holdout after being wrongly
+# rejected once (analysis/live_spread_holdout.py). But ALL 78 wide trades rested and 141
+# of 152 tight trades crossed, so "wide spread" and "provides liquidity" are the same
+# trades. Only randomisation separates them, and the answer decides whether the edge is
+# about which COINS we pick or about HOW we enter -- the latter would apply to two
+# thirds of all signals.
+#
+# The cost is bounded and small: tight-spread trades currently earn ~+3.6bps/trade, so
+# if resting misses half of them the experiment costs roughly $1 a fortnight. Arms are
+# assigned by hashing (symbol, 15m bar) rather than random(), so a restart cannot flip
+# a signal's arm mid-decision. Read it with analysis/ab_cross.py, whose metric is P&L
+# per SIGNAL, not per fill -- resting's whole cost is that it fills less often.
+#
 # --daily-loss-limit deliberately LEFT at 15. It is a loss brake, not a capacity cap,
 # and its job does not change because more positions are allowed. It will now bind more
 # often; raise it only if it is halting days that should have kept trading.
@@ -51,7 +68,8 @@ ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --max-gross 2000 \
     --max-positions 40 \
     --max-per-side 20 \
-    --daily-loss-limit 15
+    --daily-loss-limit 15 \
+    --ab-rest-pct 0.5
 Restart=always
 RestartSec=15
 StandardOutput=append:/opt/hyperdata/live_15m_ats/service.out

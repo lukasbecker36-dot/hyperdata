@@ -46,7 +46,7 @@ cannot withdraw, which is what you want on a server.
   python3 live_bot_ats.py --datadir ./live_15m_ats               # dry run
   python3 live_bot_ats.py --datadir ./live_15m_ats --live        # arm it
 """
-import argparse, csv, json, math, os, time
+import argparse, csv, hashlib, json, math, os, time
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime, timezone
 
@@ -75,6 +75,20 @@ MIN_NOTIONAL   = 10.0     # Hyperliquid perp minimum order value (USD)
 # 5 rather than the measured-best 8 because the gain is a broad plateau (+14.23 at 5,
 # +15.40 at 8) and it inverts above 8, so 5 sits further from the cliff.
 CROSS_SPREAD_BPS = 5.0
+# Fraction of TIGHT-spread signals randomly forced to REST instead of crossing.
+# 0 = experiment off (crossing decided purely by CROSS_SPREAD_BPS, the old behaviour).
+#
+# Why: wide-spread entries earn +93.2bps against +3.6bps for tight ones (n=78 vs 152,
+# t=+3.1), and that held on a clean 60-trade holdout after being wrongly rejected
+# (analysis/live_spread_holdout.py). But every wide trade RESTED and 141 of 152 tight
+# trades CROSSED, so "wide spread" and "provides liquidity" are perfectly confounded and
+# no amount of observational data separates them. Randomising the crossing decision on
+# tight spreads is the only thing that does.
+#
+# It is cheap: tight-spread trades currently earn ~+3.6bps, so if resting misses half of
+# them the experiment costs ~$1 a fortnight. The upside is that it settles which half of
+# the effect is real, and resting applies to two thirds of all signals.
+AB_REST_PCT = 0.0
 # Slippage cap for a crossing ENTRY, bps beyond the far touch. Deliberately far tighter
 # than TAKER_SLIP (which is 40bps and exists for mandatory exits): the whole edge is ~45bps,
 # so a fill 40bps worse than intended would defeat the point. An entry is optional -- if the
@@ -178,23 +192,47 @@ class LiveBot(Bot):
     LIVE_COLS = ["fee_usd", "entry_wait_s", "exit_wait_s", "exit_taker", "repegs", "sz",
                  "vpin30", "vpin60", "adverse_ofi",
                  "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier",
-                 "ats_ratio"]
+                 "ats_ratio", "ab_arm"]
     MISS_COLS = ["time", "symbol", "side", "px", "sz", "rested_s", "vratio", "rv",
                  "ats_ratio", "vpin30", "vpin60", "adverse_ofi",
-                 "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier"]
+                 "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier", "ab_arm"]
 
     @staticmethod
     def _q3(d):
-        """queue/spread/crossed/tier fields as CSV-safe strings, in LIVE_COLS order.
+        """queue/spread/crossed/tier as CSV-safe strings, in LIVE_COLS order.
 
         `crossed` lets live data confirm or refute the 5bps threshold. `tier` is the
         bot's OWN tier at signal time -- reconstructing it afterwards from current
         volumes is unreliable, since ~10% of names cross a tertile boundary within days
         (19 of paper_15m's 180 trades classify as LOW today, in a HIGH+MID-only arm).
+
+        `ab_arm` is NOT emitted here. It is appended last by each writer instead,
+        because _extend_header can only add new columns at the END of an existing
+        header: the live trade CSV already ends with ats_ratio, so an arm emitted from
+        inside _q3 would be written one column left of where the header says it is.
+        Both schemas therefore terminate in ab_arm and both writers append it.
         """
         return [("" if d.get(k) is None else f"{d[k]:.4f}")
                 for k in ("queue_usd", "queue_ratio", "spread_bps")] + \
                [str(int(d.get("crossed", 0))), str(d.get("tier") or "")]
+
+    @staticmethod
+    def _arm(d):
+        """The A/B arm, always the final column of both CSVs. See _q3."""
+        return str(d.get("ab_arm") or "")
+
+    @staticmethod
+    def _ab_flip(sym):
+        """Deterministic uniform [0,1) for this symbol in this 15m bar.
+
+        Deliberately NOT random.random(): a signal can be evaluated more than once (the
+        bot polls, and a restart re-reads the same bar), and an arm that changed between
+        evaluations would silently corrupt the experiment. Hashing (symbol, bar) gives
+        the same answer every time for the same decision while still being independent
+        across symbols and bars, which is all the randomisation needs to be.
+        """
+        key = f"{sym}:{now_ms() // 900000}".encode()
+        return int(hashlib.sha256(key).hexdigest()[:8], 16) / 0x100000000
 
     @staticmethod
     def _extend_header(path, want):
@@ -393,7 +431,8 @@ class LiveBot(Bot):
                 p.get("sz", ""), *[("" if x is None else f"{x:.4f}")
                                    for x in p.get("tox", (None, None, None))],
                 *self._q3(p),
-                ("" if p.get("ats_ratio") is None else f"{p['ats_ratio']:.4f}")])
+                ("" if p.get("ats_ratio") is None else f"{p['ats_ratio']:.4f}"),
+                self._arm(p)])
         self.notify(f"{reason.upper()} <b>{sym}</b>\n booked ${net_usd:+.2f} (fee ${fee:.3f}) hold={hold_h:.1f}h\n cum=${self.cum_pnl:+.2f}")
         self._save_state()
         return net_usd
@@ -635,6 +674,16 @@ class LiveBot(Bot):
         # cost exceeds what those misses are worth, and resting is right.
         cross = (CROSS_SPREAD_BPS > 0 and spread_bps is not None
                  and spread_bps <= CROSS_SPREAD_BPS)
+        # RANDOMISED CROSSING EXPERIMENT (see AB_REST_PCT). Tight-spread signals only:
+        # a coin flip overrides the crossing rule so that cross-vs-rest can be compared
+        # without the wide/rested confound. Wide signals are untouched.
+        ab_arm = ""
+        if AB_REST_PCT > 0 and spread_bps is not None:
+            if not cross:
+                ab_arm = "wide"
+            else:
+                ab_arm = "rest" if self._ab_flip(sym) < AB_REST_PCT else "cross"
+                cross = (ab_arm == "cross")
         # maker rests at the NEAR touch; taker takes the FAR side
         near = bid if is_buy else ask
         far = ask if is_buy else bid
@@ -660,7 +709,7 @@ class LiveBot(Bot):
             "entry_bid": bid, "entry_ask": ask, "vratio": feat["vratio"],
             "rv": feat["rv"], "ats_ratio": feat.get("ats_ratio"), "tox": tox,
             "queue_usd": q_usd, "spread_bps": spread_bps, "crossed": int(cross),
-            "tier": self.universe.get(sym),
+            "tier": self.universe.get(sym), "ab_arm": ab_arm,
             "queue_ratio": (q_usd / notional) if (q_usd is not None and notional) else None,
         }
 
@@ -672,8 +721,14 @@ class LiveBot(Bot):
             cap = round_px(px * (1 + s) if is_buy else px * (1 - s), sd, not is_buy)
             oid, fsz, fpx = self._place(sym, is_buy, sz, cap, "Ioc")
             if fsz <= 0:
+                # Log it as a miss like any other. Fill rate is half of what the
+                # experiment measures -- comparing only FILLED cross vs rest trades
+                # would answer the wrong question, since resting's whole cost is that
+                # it fills less often. Rare on this arm, but it has to be counted.
                 self.log(f"MISS  {sym:12s} crossing IOC got no fill @ cap {cap:.6g} "
                          f"(spread was {spread_bps:.1f}b) — signal abandoned")
+                self._log_miss(sym, dict(base, oid=oid), 0.0)
+                self.notify(f"⚪ MISS <b>{sym}</b> — crossing IOC unfilled, skipped")
                 return
             pend = dict(base, oid=oid, filled=fsz, px=fpx or px)
             self.log(f"CROSS {sym:12s} {'BUY ' if is_buy else 'SELL':4s} sz={fsz} "
@@ -708,6 +763,7 @@ class LiveBot(Bot):
             "queue_usd": pend.get("queue_usd"), "queue_ratio": pend.get("queue_ratio"),
             "spread_bps": pend.get("spread_bps"), "crossed": pend.get("crossed", 0),
             "tier": pend.get("tier"), "ats_ratio": pend.get("ats_ratio"),
+            "ab_arm": pend.get("ab_arm", ""),
             # kept so reconcile can cancel the entry order if this turns out to be a
             # phantom fill rather than a real position
             "oid": pend.get("oid"),
@@ -720,10 +776,8 @@ class LiveBot(Bot):
                     f"@ {pend['px']:.6g}\nsz={filled} (${notional:.0f}){part}  open={len(self.positions)}")
         self._save_state()
 
-    def _abandon(self, sym, pend):
-        """Entry window expired unfilled. Cancel, log the miss, do NOT chase."""
-        self._cancel(sym, pend["oid"])
-        rested = round((now_ms() - pend["placed_ms"]) / 1000, 1)
+    def _log_miss(self, sym, pend, rested):
+        """Append one unfilled signal to the miss log. Shared by both entry paths."""
         with open(self.miss_csv, "a", newline="") as f:
             csv.writer(f).writerow([iso(now_ms()), sym,
                                     "LONG" if pend["dir"] > 0 else "SHORT",
@@ -732,7 +786,13 @@ class LiveBot(Bot):
                                     "" if pend["ats_ratio"] is None else f"{pend['ats_ratio']:.2f}",
                                     *[("" if x is None else f"{x:.4f}")
                                       for x in pend.get("tox", (None, None, None))],
-                                    *self._q3(pend)])
+                                    *self._q3(pend), self._arm(pend)])
+
+    def _abandon(self, sym, pend):
+        """Entry window expired unfilled. Cancel, log the miss, do NOT chase."""
+        self._cancel(sym, pend["oid"])
+        rested = round((now_ms() - pend["placed_ms"]) / 1000, 1)
+        self._log_miss(sym, pend, rested)
         q = pend.get("queue_ratio")
         self.log(f"MISS  {sym:12s} unfilled after {rested}s @ {pend['px']:.6g} — "
                  f"signal abandoned (queue was {q:.1f}x ours)" if q is not None else
@@ -836,7 +896,8 @@ class LiveBot(Bot):
                 *[("" if x is None else f"{x:.4f}")
                   for x in p.get("tox", (None, None, None))],
                 *self._q3(p),
-                ("" if p.get("ats_ratio") is None else f"{p['ats_ratio']:.4f}")])
+                ("" if p.get("ats_ratio") is None else f"{p['ats_ratio']:.4f}"),
+                self._arm(p)])
         self.log(f"CLOSE {sym:12s} {reason:14s} net={net*1e4:+6.1f}bps pnl=${pnl:+.3f} "
                  f"fee=${fee_usd:.3f} hold={hold_h:.1f}h  cum=${self.cum_pnl:+.2f} "
                  f"day=${self.day_pnl:+.2f} trades={self.n_closed}")
@@ -1031,6 +1092,9 @@ class LiveBot(Bot):
             "notional": notional, "sz": sz,
             "entry_wait_s": 0.0, "fee_usd": 0.0, "tox": (None, None, None),
             "queue_usd": None, "queue_ratio": None, "spread_bps": None, "crossed": 0,
+            # adopted positions were not placed by the entry path, so they were never
+            # assigned an arm and must not be counted in the experiment
+            "ab_arm": "",
             "adopted": True, "adopt_ms": now_ms(),
         }
         held_h = (now_ms() - entry_ms) / 3600000
@@ -1139,6 +1203,8 @@ class LiveBot(Bot):
     def run(self):
         mode = "LIVE — REAL MONEY" if self.live else "DRY RUN"
         xs = (f"cross<={CROSS_SPREAD_BPS:g}b" if CROSS_SPREAD_BPS > 0 else "cross=off")
+        if AB_REST_PCT > 0:
+            xs += f" A/B {AB_REST_PCT:.0%}-rest"
         szs = (f"x({SIZE_MIN:g}-{SIZE_MAX:g} ats)" if self.size_by_ats else "FLAT")
         self.log(f"=== live bot [15m-ats] {mode} | notional=${self.notional} {szs} "
                  f"lev={self.leverage}x isolated | {xs} entry_window={ENTRY_WINDOW_S}s "
@@ -1210,12 +1276,21 @@ if __name__ == "__main__":
                     help=f"cross the spread instead of resting when the spread is at or "
                          f"below this many bps (default {CROSS_SPREAD_BPS}; 0 = always "
                          f"rest, the pre-2026-07-27 behaviour). See analysis/spread_gate.py")
+    ap.add_argument("--ab-rest-pct", type=float, default=None,
+                    help="fraction of TIGHT-spread signals randomly forced to rest "
+                         "instead of crossing, 0-1 (default 0 = off). Breaks the "
+                         "wide/rested confound that observational data cannot: see "
+                         "analysis/live_spread_holdout.py and analysis/ab_cross.py")
     ap.add_argument("--tape-dir", default=None,
                     help=f"tape logger output dir, for shadow flow-toxicity logging "
                          f"(default {TAPE_DIR}). Features are recorded, never acted on.")
     a = ap.parse_args()
     if a.cross_spread_bps is not None:
         CROSS_SPREAD_BPS = a.cross_spread_bps
+    if a.ab_rest_pct is not None:
+        if not 0.0 <= a.ab_rest_pct <= 1.0:
+            ap.error("--ab-rest-pct must be between 0 and 1")
+        AB_REST_PCT = a.ab_rest_pct
     LiveBot(a.datadir, live=a.live, notional=a.notional, max_gross=a.max_gross,
             max_positions=a.max_positions, daily_loss_limit=a.daily_loss_limit,
             leverage=a.leverage, size_by_ats=not a.flat_size, tape_dir=a.tape_dir,
