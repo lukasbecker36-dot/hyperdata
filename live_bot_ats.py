@@ -102,7 +102,18 @@ CROSS_CAP_BPS  = 10.0
 # leverage per coin so the cushion is at least LIQ_SIGMA sigma. In isolated margin this
 # costs NO return -- leverage sets margin and liquidation distance, not bps -- so it is a
 # free risk fix, paid for only in margin, of which ~7% is typically used.
-LIQ_SIGMA      = 3.0
+#
+# 3.0 -> 5.0 after the SAGA liquidation. 3 sigma is not a safety margin at this trade
+# count, it is a schedule: at ~18 trades/day a 1-in-700 event is something you meet every
+# fortnight, and two liquidations in 250 trades is what actually happened. Crypto tails
+# are also fatter than the normal-curve arithmetic behind "3 sigma is rare".
+#
+# SAGA was capped to 2x, which bought a 28.6% cushion (4.2 sigma), and it moved 28.8%.
+# At LIQ_SIGMA=5 it sizes to 1x and has 71.4% of room. The cost is small and lands only
+# on the jumpiest coins -- quiet ones already clear 5 sigma at 3x: mean leverage
+# 2.81 -> 2.45, margin/trade $12.46 -> $14.31, peak margin ~$170 -> ~$196 against $396
+# available. That is capital which sits idle 84% of the time anyway.
+LIQ_SIGMA      = 5.0
 # --- flow-toxicity shadow logging (analysis/toxicity.py) ---
 # Recorded at signal time, NEVER acted on. The tape study found that dropping the most
 # toxic 20% of fills moved a broad spike population from -259 to +7518 total net bps,
@@ -312,7 +323,20 @@ class LiveBot(Bot):
     def _lev_for(self, sym, rv):
         """Highest leverage (<= self.leverage) leaving a LIQ_SIGMA cushion over the hold.
 
-        cushion(L) = 1/L - maintenance   must be >= LIQ_SIGMA * sigma_hold
+        The cushion is NOT 1/L - maintenance. Solving the isolated-margin condition
+
+            equity = margin - N*x        must stay >= maintenance * N * (1 + x)
+
+        for the adverse move x, with margin = N/L, gives
+
+            cushion(L) = (1/L - maintenance) / (1 + maintenance)
+
+        The (1 + maintenance) divisor is the position GROWING as it moves against a
+        short, and it is not a rounding detail: for CASHCAT at 3x the naive form says
+        16.67% when the exchange liquidates at 14.29%, a 15% overstatement of exactly
+        the quantity this function exists to guarantee. Requiring
+        cushion(L) >= LIQ_SIGMA * sigma_hold and solving for L gives the form below.
+
         sigma_hold = rv * sqrt(backstop bars); maintenance ~ 1/(2*maxLeverage).
         Floors rather than rounds: a cushion below target is the failure mode being fixed.
         """
@@ -321,7 +345,7 @@ class LiveBot(Bot):
             if rv and rv > 0:
                 sigma = rv * math.sqrt(BACKSTOP_BARS)
                 maint = 1.0 / (2 * self.max_lev.get(sym, self.leverage))
-                room = LIQ_SIGMA * sigma + maint
+                room = LIQ_SIGMA * sigma * (1.0 + maint) + maint
                 if room > 0:
                     want = min(want, int(1.0 / room))
         except Exception:

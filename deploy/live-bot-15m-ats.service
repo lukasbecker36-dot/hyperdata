@@ -31,14 +31,33 @@ EnvironmentFile=/etc/hyperdata/live.env
 # The trade being accepted is that a full book puts most of the collateral at risk at once;
 # isolated margin bounds the loss per position to its own margin.
 #
-# FLAT sizing at $35. The ats multiplier has no measurable selection value on live fills:
-# corr(multiplier, net_bps) = -0.001, 95% CI [-0.112, +0.115] over 237 trades, and the
-# original backtest's own 45d holdout was flat (1.45 -> 1.48) with flat beating ats in 3
-# of 4 configs. $35 matches the current ats AVERAGE notional ($37.40), so this changes the
-# sizing RULE without also changing exposure -- one variable at a time. Deliberately not
-# $50: a full 40-position book at $50 needs 94% of collateral, which would reintroduce a
-# capacity ceiling via margin, the very thing removing the slot cap was meant to fix.
-# ats_ratio is still logged per trade so the hypothesis stays testable under flat sizing.
+# ATS sizing, base $24 (was flat $35). Reverted after 250 live flat-sized fills made the
+# ats_ratio testable without sizing confounding it (analysis/ats_verdict.py, ats_tail.py).
+#
+# The mean effect is still not significant: ats beats flat by +$13.04 on live (t=+1.69)
+# and +$23.34 on paper (t=+1.26), and those two arms share 94% of their signals, so it is
+# one weak result rather than two. That is NOT why this is on.
+#
+# The reason is the tail, and both samples agree on it. The original thesis was that
+# big-trade spikes fade harder, which predicts better WINNERS at high ats. Winners are
+# identical -- +113.0 vs +126.9 live, +112.1 vs +122.1 paper, i.e. slightly worse. The
+# entire effect is in the LOSERS: -194.2 vs -495.2 live, -164.9 vs -321.7 paper. Blowups
+# past -400bps run 2 against 12 (live) and 4 against 14 (paper), and paper's blowup rate
+# is monotone across ats quintiles at 8/7/6/3/1 percent. Per-trade sd falls from 405 to
+# 178 bps between the halves. So a low ats_ratio -- a spike made of many small trades, a
+# cascade with real participation -- is what blows up, and a high one is a single large
+# print that reverts. Both liquidations were low-ats (SAGA 1.20, CASHCAT 1.54).
+#
+# This buys VARIANCE REDUCTION, not alpha. It is worth having anyway because the strategy
+# has no stop-loss, so its risk IS the left tail, and a 6:1 blowup ratio needs far less
+# data to establish than a 20bps mean difference ever will.
+#
+# $24, not $35: the ats multiplier averages 1.483, so $24 holds mean notional at $35.60 --
+# today's exposure, unchanged. At $35 it would be $51.92, a 48% exposure increase riding
+# along with the sizing change. The analysis normalised every rule to mean(mult)=1 exactly
+# so "bet more" could not masquerade as "bet better"; deploying it any other way would
+# reintroduce the confound it was built to remove. The 0.5x floor gives $12.00, clear of
+# the $10 MIN_NOTIONAL; the 3.0x cap gives $72.00.
 #
 # --ab-rest-pct 0.5 runs a RANDOMISED experiment: half of all tight-spread signals are
 # forced to rest instead of crossing. Wide-spread signals are untouched.
@@ -63,8 +82,7 @@ EnvironmentFile=/etc/hyperdata/live.env
 ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --datadir /opt/hyperdata/live_15m_ats \
     --live \
-    --notional 35 \
-    --flat-size \
+    --notional 24 \
     --max-gross 2000 \
     --max-positions 40 \
     --max-per-side 20 \
