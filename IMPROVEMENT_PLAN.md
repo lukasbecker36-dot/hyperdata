@@ -295,6 +295,22 @@ honesty check holds: market-neutral, the filtered edge is still only +34 to +49 
 way to run a directional sleeve, whipsaw largely gone — but it improves market-timing (beta), not a proven
 coin-specific alpha. Judge and size it as beta, not as a discovered edge.
 
+**OOS — the chop filter FAILS honestly (`analysis/ma_pullback_oos.py`).** Leave-one-month-out (pick the
+BTC-ER threshold on the *other* months, apply to the held-out one, so May is scored without hindsight):
+
+  pooled baseline (no filter)   RAW +84.5 (t=4.9)   NEUTRAL +11.7 (t=0.8)
+  pooled OOS chop-filtered      RAW +58.7 (t=1.4)   NEUTRAL -31.4 (t=-0.9)
+
+Out of sample the filter is **worse than doing nothing** — it *lowers* the raw return (+84.5 → +58.7, now
+insignificant) and turns the neutral edge negative. Crucially it **does not fix the May whipsaw**: the
+honestly-chosen threshold (0.20, learned from the trending months) still traded into May's chop for −164
+bps, *worse* than the −122 baseline. The in-sample "May → +273 at ER≥0.30" was pure hindsight — only by
+seeing May could you crank the threshold high enough to sit it out. Jan flips +129 → −166 OOS too. So the
+whipsaw-removal was an artifact of choosing the threshold with knowledge of the chop; a threshold fit on
+history does not generalise to the next choppy month. Same failure mode as the retracted MA regime filter.
+Bottom line: you cannot reliably time this trend-follower on/off with a backtested chop filter — if you
+want the trend exposure, take it as fixed-size beta and accept the whipsaw drawdowns.
+
 ### HMM regime study — RESULT (`analysis/hmm_regime.py`) — diagnostic YES, optimization lever NO
 
 Fit a stdlib Gaussian HMM on a market-level observation series [BTC hourly return, log market-vol
