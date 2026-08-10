@@ -261,6 +261,26 @@ breadth and is invariant to per-name notional, so if capital-constrained, *shrin
 a cap-clogged book that shows a loss where the real strategy is +$94. True worst-burst margin to run
 uncapped is ~$864 at $25 base/3× (rarely hit; avg concurrency ≪ 81 peak).
 
+### Causal early-exit (clip the backstop tail with post-entry volume) — RESULT (`analysis/early_exit.py`) — REJECT, and it refutes the mechanism
+
+The highest-value open question: 19% of fades run to the backstop for −395 bps (the whole negative tail);
+`volume_staircase.py` suggested volume PERSISTING after the spike = participation = those losers — but
+that was lookahead. Tested causally: enter, watch only bars i+1..i+PROBE, then measure the return FROM
+the probe TO the exit (strictly future of the feature). **The causal test refutes the hypothesis.**
+Post-probe return by probe-volume quintile (PROBE=1): Q1(low vol) −0.6 → **Q5(highest vol) +103.2 bps** —
+high early volume predicts *better* forward returns, the opposite of the lookahead story (a bigger flush
+that keeps printing = a bigger reversion to fade). So bailing on high volume cuts **winners**: the vol≥2×
+rule drops total from +573% → −110% (PROBE=1) / +210% (PROBE=2), losing in ~7 of 8 months, and "tail
+avoided" is strongly *negative* (we remove positive P&L). A plain price-stop control (bail if losing at
+the probe) is also worse than holding (+487% vs +573%). Every early-exit rule — volume or price —
+underperforms simply holding to reclaim/backstop.
+
+Verdict: the −395 bps backstop tail is **not predictable at the 1–3 bar mark**, by volume or by price. This
+closes the "clip the tail" question the repo left open: the negative skew is **irreducible risk premium**,
+exactly as the README asserts, and the current design (hold to reclaim/backstop, no stops, no early exit)
+is correct. The `volume_staircase` gradient was the lookahead/circularity trap it warned about. Frontier
+now shifts to the order-flow tape (signed aggressor flow, VPIN), which needs live tape to accumulate.
+
 ### MA-pullback (buy dips / sell rips at a slow-EMA anchor) — RESULT (`analysis/ma_pullback.py`) — it's BETA
 
 User's rule: anchor = slow EMA; trend = fast (21/34) EMA vs slow. In an uptrend (fast>slow) BUY when
