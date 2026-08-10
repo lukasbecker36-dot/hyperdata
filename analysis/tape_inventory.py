@@ -58,7 +58,8 @@ for i, s in enumerate(names):
     d = post({"type": "candleSnapshot",
               "req": {"coin": s, "interval": "15m", "startTime": t0, "endTime": t1}})
     if d and len(d) > WIN + BACKSTOP:
-        cd[s] = pd.DataFrame([{"t": int(c["T"]), "h": float(c["h"]), "l": float(c["l"]),
+        # "T" is the bar CLOSE; "t" is the OPEN. See tape_events.py.
+        cd[s] = pd.DataFrame([{"t": int(c["t"]), "h": float(c["h"]), "l": float(c["l"]),
                                "c": float(c["c"]), "v": float(c["v"]),
                                "n": int(c["n"])} for c in d]).sort_values("t")
     if (i+1) % 40 == 0:
