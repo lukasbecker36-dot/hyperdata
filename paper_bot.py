@@ -116,6 +116,14 @@ class Bot:
         self._last_summary_day = None
         self.universe = {}      # symbol -> tier
         self.rv_thr = RV_FALLBACK[interval]
+        # percentile of recent signal rv used as the gate. Per-instance so an arm can
+        # move it without touching the others; defaults to the module constant, so the
+        # paper arms are unchanged.
+        self.rv_pctile = RV_PCTILE
+        # what the gate WOULD be at the reference 60th percentile. Only differs from
+        # rv_thr when rv_pctile has been moved, and it is what makes the added trades
+        # separable afterwards: rv < rv_thr_ref means the old gate would have skipped it.
+        self.rv_thr_ref = self.rv_thr
         # isolated-margin liquidation distance: the adverse move (fraction of notional)
         # that wipes posted margin down to maintenance -> forced exit. None disables it.
         lm = (1.0 / LEVERAGE - MAINT_MARGIN) if LEVERAGE and LEVERAGE > 0 else None
@@ -313,8 +321,12 @@ class Bot:
             time.sleep(0.05)
         if len(rvs) > 200:
             rvs.sort()
-            self.rv_thr = rvs[int(len(rvs)*RV_PCTILE)]
-            self.log(f"calibrated rv threshold = {self.rv_thr:.6f}  (from {len(rvs)} signals)")
+            self.rv_thr = rvs[int(len(rvs)*self.rv_pctile)]
+            self.rv_thr_ref = rvs[int(len(rvs)*RV_PCTILE)]
+            extra = ("" if abs(self.rv_pctile - RV_PCTILE) < 1e-9 else
+                     f"  [{RV_PCTILE:.0%} reference = {self.rv_thr_ref:.6f}]")
+            self.log(f"calibrated rv threshold = {self.rv_thr:.6f} "
+                     f"@{self.rv_pctile:.0%}  (from {len(rvs)} signals){extra}")
         else:
             self.log(f"calibration thin ({len(rvs)}), using fallback rv threshold {self.rv_thr:.6f}")
 

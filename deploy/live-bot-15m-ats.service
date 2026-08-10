@@ -76,7 +76,39 @@ EnvironmentFile=/etc/hyperdata/live.env
 # a signal's arm mid-decision. Read it with analysis/ab_cross.py, whose metric is P&L
 # per SIGNAL, not per fill -- resting's whole cost is that it fills less often.
 #
-# --daily-loss-limit deliberately LEFT at 15. It is a loss brake, not a capacity cap,
+# --rv-pctile 0.40 (was the 0.60 module default). rv is the strongest predictor in the
+# whole feature set -- +0.142 with the outcome, t=+9.76 over 4,833 events, monotone across
+# quintiles and still monotone after dividing by rv itself, so it is not merely "jumpy
+# coins move further" (analysis/tape_features.py).
+#
+# Priced on the MARGINAL BAND rather than the threshold, because "gate at 40 vs 60"
+# bundles trades already taken with new ones and is dominated by trades the change does
+# not touch. The 40-60 band alone earns +34.7bps net of 5bps costs on 854 events, t=+5.0,
+# and survives to 9bps (+30.7, t=+4.4) -- which matters because low-rv coins have tighter
+# spreads, so the added trades skew toward the 5.76bps crossing fee rather than the
+# 2.83bps resting one. The rv rank is computed against a ROLLING 15d window, matching how
+# the bot calibrates, since ranking against the whole sample is lookahead
+# (analysis/rv_gate.py). The bottom 30% of rv is genuinely bad (-13.4bps at 10-20th), so
+# a gate is still needed -- it was just set about 20 points too high.
+#
+# Known weakness: 85% of the band's dollars are 2026-06. That pattern has killed five
+# filters here. It fails differently this time -- July is +16.6bps on 294 events, still
+# clearly positive, where previous failures went to zero or negative, and the time-split
+# holdout is +35.2 / +34.2. Treated as a caution, not a disqualification.
+#
+# No randomisation, unlike --ab-rest-pct. There is no confound to break: enabling the band
+# creates trades whose P&L is observed directly and whose counterfactual is exactly zero.
+# Every trade now logs rv and rv_thr_ref, so rv < rv_thr_ref marks a trade taken only
+# because the gate moved, and the band can be priced on its own.
+#
+# PRE-REGISTERED STOP RULE: if the band's own realised net is negative after 150 trades,
+# revert to 0.60. Expected ~10 extra trades/day; if the band is truly flat the cost is
+# fees only, about $6/month, and the downside at the worst band ever observed is ~$14.
+#
+# --daily-loss-limit deliberately LEFT at 15, and this change makes it bind MORE often
+# (~56% more trades; it already reached -$11.30 of -$15 on 2026-08-08). Left alone
+# deliberately -- one variable at a time -- but it is now the most likely thing to
+# interfere with reading the result.
 # and its job does not change because more positions are allowed. It will now bind more
 # often; raise it only if it is halting days that should have kept trading.
 ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
@@ -87,7 +119,8 @@ ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --max-positions 40 \
     --max-per-side 20 \
     --daily-loss-limit 15 \
-    --ab-rest-pct 0.5
+    --ab-rest-pct 0.5 \
+    --rv-pctile 0.40
 Restart=always
 RestartSec=15
 StandardOutput=append:/opt/hyperdata/live_15m_ats/service.out
