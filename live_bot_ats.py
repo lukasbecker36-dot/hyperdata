@@ -227,7 +227,7 @@ class LiveBot(Bot):
     MISS_COLS = ["time", "symbol", "side", "px", "sz", "rested_s", "vratio", "rv",
                  "ats_ratio", "vpin30", "vpin60", "adverse_ofi",
                  "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier", "ab_arm",
-                 "rv", "rv_thr_ref"]
+                 "rv_thr_ref"]
 
     @staticmethod
     def _q3(d):
@@ -249,18 +249,23 @@ class LiveBot(Bot):
                [str(int(d.get("crossed", 0))), str(d.get("tier") or "")]
 
     @staticmethod
-    def _arm(d):
-        """Trailing columns of both CSVs, appended last by every writer. See _q3.
+    def _tail(d, with_rv=True):
+        """Trailing columns, appended last by every writer. See _q3.
 
-        `rv` and `rv_thr_ref` exist to make the rv-gate change measurable. rv_thr_ref is
-        the threshold the OLD 60th-percentile gate would have used at that moment, so
-        rv < rv_thr_ref marks a trade only taken because the gate was lowered. Without
-        both numbers the added band cannot be told apart from the rest afterwards, and
-        the whole point of the change is to price that band on its own.
+        `rv` and `rv_thr_ref` make the rv-gate change measurable: rv_thr_ref is the
+        threshold the OLD 60th-percentile gate would have used at that moment, so
+        rv < rv_thr_ref marks a trade taken only because the gate was lowered.
+
+        with_rv=False for the MISS log, which already carries rv at column 8 from the
+        original schema. _extend_header dedupes a repeated name out of the header but
+        the writer would still emit the value, so listing it twice writes one field MORE
+        than the header has and shifts every trailing column left by one.
         """
-        return [str(d.get("ab_arm") or ""),
-                ("" if d.get("rv") is None else f"{d['rv']:.6f}"),
-                ("" if d.get("rv_thr_ref") is None else f"{d['rv_thr_ref']:.6f}")]
+        out = [str(d.get("ab_arm") or "")]
+        if with_rv:
+            out.append("" if d.get("rv") is None else f"{d['rv']:.6f}")
+        out.append("" if d.get("rv_thr_ref") is None else f"{d['rv_thr_ref']:.6f}")
+        return out
 
     @staticmethod
     def _ab_flip(sym):
@@ -486,7 +491,7 @@ class LiveBot(Bot):
                                    for x in p.get("tox", (None, None, None))],
                 *self._q3(p),
                 ("" if p.get("ats_ratio") is None else f"{p['ats_ratio']:.4f}"),
-                *self._arm(p)])
+                *self._tail(p)])
         self.notify(f"{reason.upper()} <b>{sym}</b>\n booked ${net_usd:+.2f} (fee ${fee:.3f}) hold={hold_h:.1f}h\n cum=${self.cum_pnl:+.2f}")
         self._save_state()
         return net_usd
@@ -842,7 +847,7 @@ class LiveBot(Bot):
                                     "" if pend["ats_ratio"] is None else f"{pend['ats_ratio']:.2f}",
                                     *[("" if x is None else f"{x:.4f}")
                                       for x in pend.get("tox", (None, None, None))],
-                                    *self._q3(pend), *self._arm(pend)])
+                                    *self._q3(pend), *self._tail(pend, with_rv=False)])
 
     def _abandon(self, sym, pend):
         """Entry window expired unfilled. Cancel, log the miss, do NOT chase."""
@@ -953,7 +958,7 @@ class LiveBot(Bot):
                   for x in p.get("tox", (None, None, None))],
                 *self._q3(p),
                 ("" if p.get("ats_ratio") is None else f"{p['ats_ratio']:.4f}"),
-                *self._arm(p)])
+                *self._tail(p)])
         self.log(f"CLOSE {sym:12s} {reason:14s} net={net*1e4:+6.1f}bps pnl=${pnl:+.3f} "
                  f"fee=${fee_usd:.3f} hold={hold_h:.1f}h  cum=${self.cum_pnl:+.2f} "
                  f"day=${self.day_pnl:+.2f} trades={self.n_closed}")
