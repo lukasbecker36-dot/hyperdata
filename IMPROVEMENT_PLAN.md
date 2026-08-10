@@ -261,6 +261,29 @@ breadth and is invariant to per-name notional, so if capital-constrained, *shrin
 a cap-clogged book that shows a loss where the real strategy is +$94. True worst-burst margin to run
 uncapped is ~$864 at $25 base/3× (rarely hit; avg concurrency ≪ 81 peak).
 
+### MA-pullback (buy dips / sell rips at a slow-EMA anchor) — RESULT (`analysis/ma_pullback.py`) — it's BETA
+
+User's rule: anchor = slow EMA; trend = fast (21/34) EMA vs slow. In an uptrend (fast>slow) BUY when
+price pulls back down to the slow line; in a downtrend SELL when it rallies up to it. Bet with the trend,
+exit on a fixed hold. (A literal 200-*day* EMA is untestable — only ~206 days of 1h data, 200-day warmup
+leaves ~6 days — so tested the same structure with the slow anchor in HOURS.)
+
+Raw it looks strong: short holds (6–24h) lose to cost, but **slow=400h / fast=34 / hold=72h = +84.5
+bps/trade, t=+4.89, win 55%**, and the against-trend placebo is negative everywhere (−10 to −29 bps) —
+so the direction is correct. But the strong configs are all *with-trend 3-day holds*, i.e. trend-following,
+so two checks:
+- **Market-neutralize (subtract BTC over the same 72h hold): +84.5 → +11.7 bps, t=+0.76.** ~86% of the
+  edge is market beta. The residual coin-specific alpha is insignificant.
+- **Monthly:** positive in 6/7 months but +257 (Feb) → **−122 (May)** → +194 (Jun). That swing is the
+  trend-whipsaw signature, not a stable pullback edge.
+
+Verdict: "buy dips in an uptrend / sell rips in a downtrend, hold 3 days" profits because the market keeps
+trending (BTC captures it), not because the MA touch predicts a coin-specific bounce. It's repackaged
+**trend-following/directional beta** — regime-dependent (May whipsaw), not a usable standalone alpha, and
+it does not complement the fade (it's the opposite horizon and sign). Same recurring lesson as the
+retracted MA regime filter and the XS-momentum reject: MA/trend effects here are beta or single-episode,
+not robust alpha. Market-neutral it's a dead +12 bps before any multiple-testing haircut.
+
 ### HMM regime study — RESULT (`analysis/hmm_regime.py`) — diagnostic YES, optimization lever NO
 
 Fit a stdlib Gaussian HMM on a market-level observation series [BTC hourly return, log market-vol
