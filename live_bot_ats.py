@@ -103,17 +103,37 @@ CROSS_CAP_BPS  = 10.0
 # costs NO return -- leverage sets margin and liquidation distance, not bps -- so it is a
 # free risk fix, paid for only in margin, of which ~7% is typically used.
 #
-# 3.0 -> 5.0 after the SAGA liquidation. 3 sigma is not a safety margin at this trade
-# count, it is a schedule: at ~18 trades/day a 1-in-700 event is something you meet every
-# fortnight, and two liquidations in 250 trades is what actually happened. Crypto tails
-# are also fatter than the normal-curve arithmetic behind "3 sigma is rare".
+# 3.0 -> 5.0 -> 6.0, once per liquidation, which is itself the finding. Each one has
+# needed a bigger cushion than the last:
 #
-# SAGA was capped to 2x, which bought a 28.6% cushion (4.2 sigma), and it moved 28.8%.
-# At LIQ_SIGMA=5 it sizes to 1x and has 71.4% of room. The cost is small and lands only
-# on the jumpiest coins -- quiet ones already clear 5 sigma at 3x: mean leverage
-# 2.81 -> 2.45, margin/trade $12.46 -> $14.31, peak margin ~$170 -> ~$196 against $396
-# available. That is capital which sits idle 84% of the time anyway.
-LIQ_SIGMA      = 5.0
+#   CASHCAT  moved 14.8% =  3.5 sigma  -> needed LIQ_SIGMA >= 4
+#   SAGA     moved 28.8% =  4.2 sigma  -> needed LIQ_SIGMA >= 5
+#   BOME     moved 14.6% =  5.3 sigma  -> needed LIQ_SIGMA >= 6
+#
+# 3 sigma was never a safety margin at this trade count, it was a schedule: at ~18
+# trades/day a 1-in-700 event turns up every fortnight, and crypto tails are fatter than
+# the normal-curve arithmetic behind "3 sigma is rare". 6 catches all three observed
+# liquidations -- and is openly FITTED to the worst of them, so the honest expectation is
+# that some future move needs 7. It is set here because the cost is small, not because
+# the sample proves 6 is enough.
+#
+# What it changes, on the 178 signals with logged rv: 32% step 3x -> 2x, 4% step 2x -> 1x,
+# 64% are untouched. A stepped-down trade ties up $6 more on a $36 position and moves its
+# liquidation from 14.3% away to 28.6%. Nothing else moves -- same signals, same notional,
+# same entry and exit, identical bps on every trade that does not liquidate. Leverage here
+# is not a bet multiplier; it only buys distance from a forced exit.
+#
+# Cost: mean leverage 2.49 -> 2.13, margin $14.43 -> $16.91 per $36 position. Peak
+# utilisation 34% -> 40% of $383 spot, or 53% -> 62% if the 40th-percentile rv gate
+# delivers its expected +56% trades. That 62% is why this stops at 6 and not 7: it is the
+# first setting where margin starts to look like a constraint rather than an irrelevance.
+#
+# Worth keeping in proportion: liquidation is ~30% worse than holding, not a total loss.
+# CASHCAT reconstructed at survivable leverage still ran to the backstop for -1044bps
+# against the -1489 it actually lost (analysis/cashcat_counterfactual.py). Of the -$20.39
+# across three liquidations only ~$6 is the liquidation premium; the rest is the strategy's
+# own left tail, which no leverage setting prevents.
+LIQ_SIGMA      = 6.0
 # --- flow-toxicity shadow logging (analysis/toxicity.py) ---
 # Recorded at signal time, NEVER acted on. The tape study found that dropping the most
 # toxic 20% of fills moved a broad spike population from -259 to +7518 total net bps,
