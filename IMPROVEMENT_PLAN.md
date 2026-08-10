@@ -284,6 +284,17 @@ it does not complement the fade (it's the opposite horizon and sign). Same recur
 retracted MA regime filter and the XS-momentum reject: MA/trend effects here are beta or single-episode,
 not robust alpha. Market-neutral it's a dead +12 bps before any multiple-testing haircut.
 
+**Chop filter (`analysis/ma_pullback_chop.py`):** gating entries on a causal efficiency ratio (ER over
+48h). A **market-level** filter (BTC ER) does exactly what's asked — it screens out choppy regimes, lifts
+raw return (+84 → +131 at BTC ER≥0.25, +147 at ≥0.30) and **removes the May whipsaw** (−122 → −52, then
++273 once you sit out the chop entirely). A per-*coin* ER filter does nothing (May stays −180 to −260) —
+it's specifically the *market's* trend state that matters, consistent with the effect being beta. But the
+honesty check holds: market-neutral, the filtered edge is still only +34 to +49 bps at **t=1.1–1.6
+(insignificant)**, and that's the best cell of a threshold sweep (Deflated-Sharpe would trim it) on ~400–
+600 clustered trades. So a BTC-ER chop filter turns this into a *better-timed trend-follower* — a sensible
+way to run a directional sleeve, whipsaw largely gone — but it improves market-timing (beta), not a proven
+coin-specific alpha. Judge and size it as beta, not as a discovered edge.
+
 ### HMM regime study — RESULT (`analysis/hmm_regime.py`) — diagnostic YES, optimization lever NO
 
 Fit a stdlib Gaussian HMM on a market-level observation series [BTC hourly return, log market-vol
