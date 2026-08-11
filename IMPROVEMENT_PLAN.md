@@ -595,3 +595,13 @@ ats) is the best ats config; do NOT build ats+mid arms. Live arm is the deciding
 Every experiment carries a one-line hypothesis, an accept criterion (OOS-deflated Sharpe
 improvement + t ≥ 3), and a kill criterion. Adopt sparingly to avoid the multiple-testing trap
 the report warns about. Reserve the most recent ~6 weeks as an untouched final holdout.
+
+### Geometry batch 2 — no new gate; pierce is specific (`analysis/geometry_batch.py`)
+
+Tested three more candle-only entry-shape features against the fade. Range COMPRESSION (broke out of a
+tight coil vs a wide range) is flat across terciles (+19/+24/+23) — no edge. GAP-vs-GRIND (one-bar jump vs
+a multi-bar move) is non-monotone and unstable OOS (5/8 months) — no clean edge. Vol-normalized pierce
+(pierce/rv) is strong (+52, 7/8 months) but that is just pierce again, and it is *weaker* in the first
+half than raw pierce (+16 vs +47), so normalizing by vol does not improve stationarity — raw pierce is
+the better form. Net: no second geometry gate, but a useful sharpening — the edge is specifically the
+OVERSHOOT DEPTH, not the setup shape or the move concentration. Pierce stands alone, in raw form.
