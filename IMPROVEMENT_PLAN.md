@@ -261,6 +261,31 @@ breadth and is invariant to per-name notional, so if capital-constrained, *shrin
 a cap-clogged book that shows a loss where the real strategy is +$94. True worst-burst margin to run
 uncapped is ~$864 at $25 base/3× (rarely hit; avg concurrency ≪ 81 peak).
 
+### Entry geometry — PIERCE DEPTH is a real, OOS-robust edge concentrator (`analysis/entry_geometry.py`)
+
+Conditioned the fade on the geometry of the entry bar (candles only, all causal). Refuted the "rejection
+wick = exhaustion" intuition — the OPPOSITE holds: the fade works best on the most-EXTENDED breakouts, not
+the ones already reversing. The winner is **pierce depth** = how far the breakout close pushed beyond the
+prior 24h range:
+
+  pierce tercile:  LOW +1.1  MID -3.8  **HIGH +68.7 bps (t=3.64)**  vs +22 baseline
+
+Unlike every prior regime effect, this **survives both robustness tests**: positive in **all 8 months**
+AND *stronger* out of sample (1st half +47 → 2nd half +90 — it does not decay). And it is **not the rv
+gate in disguise**: pierce/rv correlate +0.61 but the double-sort shows pierce sorts within every vol
+bucket — deep pierce earns +84 bps even among LOW-vol signals and +104 among HIGH-vol, while shallow
+pierces are flat/negative regardless of vol. So the edge lives specifically in the deepest overshoots;
+the shallow two-thirds of signals are ~break-even.
+
+Mechanism (on-thesis): a deeper pierce = a more extreme, more stretched overshoot = a bigger snap-back
+(and a larger reclaim distance to the range boundary). This is the forced-flow-overshoot thesis, sharpened.
+
+Deployment: natural **sizing lever** (like ats) — scale notional up on deep-pierce signals, down/off on
+shallow ones — which keeps breadth while concentrating capital on the third of signals that carry the
+edge. NEEDS the equity/return-DD backtest before trusting it live (deep pierces are larger bets, so
+confirm the lift is risk-adjusted, not just bigger bps). This is the first robust NEW positive result in
+the whole conditioning search and the strongest candidate for an actual improvement to the live arm.
+
 ### Fade edge conditioning — hour / session / listing-age / archetype (`analysis/regime_conditioning.py`)
 
 Sliced the fade's per-trade edge across never-tested axes. Cleanly REFUTED two intuitions: **young
