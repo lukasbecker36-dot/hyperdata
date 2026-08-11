@@ -142,6 +142,7 @@ LIQ_SIGMA      = 6.0
 TAPE_DIR       = "/opt/hyperdata/tape"
 TAPE_TAIL_MB   = 12       # tail of today's tape to read per cycle (~3h of prints)
 FLOW_MINS      = 60       # trailing window for vpin60 / adverse_ofi
+TERM_MINS      = 2        # terminal window for term_ofi / term_n (shadow only)
 PERP_MAX_DEC   = 6        # MAX_DECIMALS for perps; px decimals <= PERP_MAX_DEC - szDecimals
 BACKSTOP_BARS  = 32       # 8h at 15m -- the horizon a liquidation cushion must survive
 MAINNET        = "https://api.hyperliquid.xyz"
@@ -223,11 +224,11 @@ class LiveBot(Bot):
     LIVE_COLS = ["fee_usd", "entry_wait_s", "exit_wait_s", "exit_taker", "repegs", "sz",
                  "vpin30", "vpin60", "adverse_ofi",
                  "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier",
-                 "ats_ratio", "ab_arm", "rv", "rv_thr_ref", "pierce", "pierce_pct"]
+                 "ats_ratio", "ab_arm", "rv", "rv_thr_ref", "pierce", "pierce_pct", "term_ofi", "term_n"]
     MISS_COLS = ["time", "symbol", "side", "px", "sz", "rested_s", "vratio", "rv",
                  "ats_ratio", "vpin30", "vpin60", "adverse_ofi",
                  "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier", "ab_arm",
-                 "rv_thr_ref", "pierce", "pierce_pct"]
+                 "rv_thr_ref", "pierce", "pierce_pct", "term_ofi", "term_n"]
 
     @staticmethod
     def _q3(d):
@@ -268,6 +269,8 @@ class LiveBot(Bot):
         # pierce and its percentile rank, so the sizing tilt stays separable afterwards
         out.append("" if d.get("pierce") is None else f"{d['pierce']:.6f}")
         out.append("" if d.get("pierce_pct") is None else f"{d['pierce_pct']:.4f}")
+        out.append("" if d.get("term_ofi") is None else f"{d['term_ofi']:.4f}")
+        out.append("" if d.get("term_n") is None else str(int(d["term_n"])))
         return out
 
     def _pierce_pct(self, pierce):
@@ -655,15 +658,58 @@ class LiveBot(Bot):
                 except ValueError:
                     continue
                 d = self.flow.setdefault(p[1], {})
-                b = d.setdefault(t // 60000, [0.0, 0.0])
+                # [buy_ntl, sell_ntl, n_prints]. The count is what makes terminal OFI
+                # interpretable: an OFI near +/-1.0 on 2-3 prints is measuring THINNESS,
+                # not pressure, and that artifact is why every earlier flow feature showed
+                # a spurious hump at the MID tercile (analysis/spike_flow.py).
+                b = d.setdefault(t // 60000, [0.0, 0.0, 0])
                 if p[2] == "B": b[0] += ntl
                 else:           b[1] += ntl
+                b[2] += 1
                 n += 1
             self.log(f"tape flow: {n:,} prints, {len(self.flow)} coins "
                      f"(last {FLOW_MINS}m, shadow only)")
         except Exception as e:
             self.flow = {}
             self.log(f"WARN tape flow: {e}")
+
+    def terminal_flow(self, sym, brk, close_ms):
+        """(term_ofi, term_n) over the last TERM_MINS of the SIGNAL BAR. Shadow only.
+
+        Signed by brk, so POSITIVE means flow was still running in the breakout direction
+        at the close (continuation, the fade's enemy) and NEGATIVE means it had flipped
+        (exhaustion). Windowed on the bar's own close rather than now_ms(), because the bot
+        acts up to a minute after the close and those extra minutes are not part of the
+        spike.
+
+        Logged, never acted on. analysis/spike_flow.py found that once measurement quality
+        is controlled for -- terminal print count >= 30 -- the LOW terminal-OFI tercile
+        beats HIGH by ~25bps, growing monotonically with print count (+4.5 at >=10, +24.7
+        at >=30, +28.1 at >=60). That is the right sign for the exhaustion hypothesis but
+        it is inside the noise floor: at sd 196bps a tercile gap needs 53bps to clear t=3
+        at n=729. Resolving ~25bps needs roughly 3,300 qualifying events against 1,217
+        today. So this accumulates the evidence on real fills instead of sizing on it,
+        exactly as ats_ratio was logged through the flat-sizing period.
+        """
+        try:
+            d = self.flow.get(sym)
+            if not d:
+                return (None, None)
+            end_m = int(close_ms) // 60000
+            buy = sell = 0.0
+            cnt = 0
+            for m in range(end_m - TERM_MINS + 1, end_m + 1):
+                v = d.get(m)
+                if not v:
+                    continue
+                buy += v[0]; sell += v[1]
+                cnt += v[2] if len(v) > 2 else 0
+            den = buy + sell
+            if den <= 0:
+                return (None, cnt or None)
+            return ((buy - sell) / den * brk, cnt)
+        except Exception:
+            return (None, None)
 
     def toxicity(self, sym, brk):
         """(vpin30, vpin60, adverse_ofi) or Nones. See analysis/toxicity.py.
@@ -771,6 +817,7 @@ class LiveBot(Bot):
             self.log(f"SKIP {sym}: could not confirm {self.leverage}x isolated leverage")
             return
         tox = self.toxicity(sym, brk)          # shadow only: recorded, never gates
+        tflow = self.terminal_flow(sym, brk, feat.get("close_ms") or now_ms())
         # queue ahead of us at the price we rest at. Meaningless when crossing (we are the
         # aggressor), so record it only for maker placements.
         q_usd = None if cross else self.queue_ahead_usd(
@@ -785,6 +832,7 @@ class LiveBot(Bot):
             "tier": self.universe.get(sym), "ab_arm": ab_arm,
             "rv_thr_ref": self.rv_thr_ref,
             "pierce": feat.get("pierce"), "pierce_pct": self._pierce_pct(feat.get("pierce")),
+            "term_ofi": tflow[0], "term_n": tflow[1],
             "queue_ratio": (q_usd / notional) if (q_usd is not None and notional) else None,
         }
 
@@ -841,6 +889,7 @@ class LiveBot(Bot):
             "ab_arm": pend.get("ab_arm", ""), "rv": pend.get("rv"),
             "rv_thr_ref": pend.get("rv_thr_ref"),
             "pierce": pend.get("pierce"), "pierce_pct": pend.get("pierce_pct"),
+            "term_ofi": pend.get("term_ofi"), "term_n": pend.get("term_n"),
             # kept so reconcile can cancel the entry order if this turns out to be a
             # phantom fill rather than a real position
             "oid": pend.get("oid"),
@@ -1172,7 +1221,7 @@ class LiveBot(Bot):
             # adopted positions were not placed by the entry path, so they were never
             # assigned an arm and must not be counted in the experiment
             "ab_arm": "", "rv": None, "rv_thr_ref": None,
-            "pierce": None, "pierce_pct": None,
+            "pierce": None, "pierce_pct": None, "term_ofi": None, "term_n": None,
             "adopted": True, "adopt_ms": now_ms(),
         }
         held_h = (now_ms() - entry_ms) / 3600000
