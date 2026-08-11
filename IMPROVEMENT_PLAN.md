@@ -643,3 +643,23 @@ already equity-tested) and **market volatility** (fade when BTC is moving; avoid
 super-cell is btc-HIGH × rv-HIGH × pierce-HIGH. Market-vol still needs the equity/return-DD test before
 live (as pierce got), but both deployment blockers (rv-redundancy, beta) are cleared. Calm-market
 avoidance (btc-LOW) is the clean risk-off signal — the fade should stand down when the market is quiet.
+
+### Capstone equity — stacked gates (`analysis/combined_equity.py`, causal trailing thresholds)
+
+              LIVE(all+ats)  +deep-pierce  +mkt-vol   +BOTH
+  trades           2202          1213        1445       880
+  total P&L       +1038         +1070        +888       +776
+  daily Sharpe     2.04          2.87        2.13       2.58
+  holdout Sharpe   1.48          2.50        2.49       3.60
+  max drawdown     -256          -187        -254       -191
+  return/|DD|      4.06          5.72        3.50       4.06
+  ROI on margin    +55%          +66%        +47%       +48%
+
+**Deep-pierce alone wins on every metric** (return/DD 4.06→5.72, holdout 1.48→2.50, lower DD, from half
+the trades). **The market-vol gate does NOT earn its place as a filter** despite being a real per-trade
+edge: alone it cuts total P&L and return/DD; stacked it maxes holdout Sharpe (3.60) but at the lowest P&L
+and no better return/DD than baseline. Key lesson: pierce-shallow trades are truly break-even (dropping =
+free), but calm-market trades are below-average yet still net-positive (dropping = costs real P&L). Filter
+break-even trades, not merely weaker ones. **DEPLOY: deep-pierce filter + ats. Market-vol: a validated
+edge but keep it OUT as a hard filter — revisit only as a soft sizing tilt (size down in calm markets)
+later.** This is the final, capital-efficient config of the whole search.
