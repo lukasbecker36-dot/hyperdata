@@ -261,6 +261,25 @@ breadth and is invariant to per-name notional, so if capital-constrained, *shrin
 a cap-clogged book that shows a loss where the real strategy is +$94. True worst-burst margin to run
 uncapped is ~$864 at $25 base/3× (rarely hit; avg concurrency ≪ 81 peak).
 
+### Fade edge conditioning — hour / session / listing-age / archetype (`analysis/regime_conditioning.py`)
+
+Sliced the fade's per-trade edge across never-tested axes. Cleanly REFUTED two intuitions: **young
+listings are worse, not better** (new <21d = +0.1 bps vs +47 for 60-120d coins — young perps trend in
+price discovery, they don't revert), and **thin late hours are worse, not better** (Late 21-24h UTC =
+−52 bps — thin books mean moves *drift* instead of snapping back; the fade needs enough liquidity to
+provide the reversion). DURABLE confirmations, holding across both sample halves and ~7-8/8 months, are
+the axes already deployed: **MID tier** (+36 vs +10 HIGH) and **rv-HIGH** (monotone −12/+22/+56 by vol
+tercile). So the mechanism picture is *liquid-enough + volatile + mid-cap* = forced flow into a book with
+the capital to push it back.
+
+The one *new* lead — **16-20h UTC** (US peak-liquidity block) — looked outstanding (+82 bps, positive in
+all 8 months) but **fails the honest OOS split**: first-half edge +138 bps (block +120 vs rest −18) →
+second-half +8 bps (block +33 vs rest +25). Hour-by-hour is noisy, not a plateau. So it is another
+non-stationary concentration, not a deployable filter; at most a soft sizing tilt that may keep decaying.
+Net: the conditioning study validated the strategy's *existing* gates and mapped where the edge lives, but
+found no robust new regime multiplier. The mechanism map (liquid+volatile+mid) is the useful output — it
+points the next build (liquidation-cascade fade) at the right conditions.
+
 ### Causal early-exit (clip the backstop tail with post-entry volume) — RESULT (`analysis/early_exit.py`) — REJECT, and it refutes the mechanism
 
 The highest-value open question: 19% of fades run to the backstop for −395 bps (the whole negative tail);
