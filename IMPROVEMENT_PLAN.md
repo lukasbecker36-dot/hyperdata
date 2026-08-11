@@ -280,11 +280,28 @@ the shallow two-thirds of signals are ~break-even.
 Mechanism (on-thesis): a deeper pierce = a more extreme, more stretched overshoot = a bigger snap-back
 (and a larger reclaim distance to the range boundary). This is the forced-flow-overshoot thesis, sharpened.
 
-Deployment: natural **sizing lever** (like ats) — scale notional up on deep-pierce signals, down/off on
-shallow ones — which keeps breadth while concentrating capital on the third of signals that carry the
-edge. NEEDS the equity/return-DD backtest before trusting it live (deep pierces are larger bets, so
-confirm the lift is risk-adjusted, not just bigger bps). This is the first robust NEW positive result in
-the whole conditioning search and the strongest candidate for an actual improvement to the live arm.
+Deployment — equity backtest (`analysis/pierce_equity.py`, 2202 causal signals, 45d holdout, 3x):
+
+  metric              FLAT    ATS(live)  PIERCE-size  DEEP-only filter
+  daily Sharpe       +1.61     +2.04       +2.32          +2.40
+  holdout Sharpe     +1.45     +1.48      **+3.44**      **+2.94**
+  max drawdown       -298      -256        -412           -200
+  return/|DD|         2.21      4.06        3.55           3.46
+  peak margin       $2667     $3506       $4556          $2233
+  trades             2202      2202        2202           1213
+
+The **holdout (OOS) Sharpe jumps from ~1.5 to +3.4 (pierce sizing) / +2.9 (filter)** — the biggest OOS
+lift any change has produced, corroborating that pierce strengthens out of sample. The caveat came true:
+pierce-*sizing* lifts Sharpe but at a **bigger drawdown (-412) and much more capital ($4.6k)** because it
+upsizes the most extreme trades. The cleaner deploy is the **deep-only FILTER** (drop the shallow-pierce
+half, flat size): **same total P&L as trading everything, from half the trades, with a better Sharpe
+(2.40 vs 1.61), a smaller drawdown (-200 vs -298), and the least capital.** The shallow half contributes
+~nothing (its aggregate net is slightly negative here), so dropping it is close to free.
+
+Verdict: **pierce is the first robust, deployable improvement of the whole search.** Recommend the deep-
+pierce FILTER (skip breakouts whose pierce is below the trailing median) as the primary change — it
+improves Sharpe AND cuts drawdown AND cuts capital at once — optionally with a mild pierce up-tilt if
+capital is available. First real live-worthy change surfaced since the ats/rv/spread tuning.
 
 ### Fade edge conditioning — hour / session / listing-age / archetype (`analysis/regime_conditioning.py`)
 
