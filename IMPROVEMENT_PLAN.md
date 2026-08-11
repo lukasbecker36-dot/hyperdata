@@ -626,3 +626,20 @@ correlates with coin rv, already gated) to confirm it adds market-level info bey
 check — "fade harder when BTC moves" could be partly market-timing/beta like the MA-pullback, not pure
 reversion; (3) equity/return-DD test. Promising second conditioner, but pierce remains the cleaner,
 proven-deployable one.
+
+### Market-vol gate — VALIDATED as a real second lever (`analysis/market_vol_check.py`)
+
+Ran the two gating checks on the btc-HIGH / idio-LOW finding. Both pass:
+1. **rv-independence:** btc_move ↔ coin_rv correlation is only **-0.11** (near-independent), and btc_move
+   sorts within every rv column (rv-LOW: btc-H +20 vs btc-L -45; best cell btc-H×rv-H = +97; fade LOSES
+   in calm-market cells -45/-23). So it adds genuine market-level info beyond the per-coin rv gate.
+2. **beta check (decisive):** hedging BTC out of each trade over its hold, **btc-HIGH RAW +49.2 → hedged
+   +43.5 and t RISES to +4.5** (idio-LOW +55.7 → +39.4, t=4.8). The edge survives almost fully — real
+   reversion, NOT market-timing beta (contrast the MA-pullback, which collapsed +84→+12 when hedged).
+   Hedging strips market noise without killing the mean = a true per-trade selection edge.
+
+So there are now TWO validated, independent, additive conditioners: **pierce depth** (overshoot magnitude,
+already equity-tested) and **market volatility** (fade when BTC is moving; avoid calm markets). Best
+super-cell is btc-HIGH × rv-HIGH × pierce-HIGH. Market-vol still needs the equity/return-DD test before
+live (as pierce got), but both deployment blockers (rv-redundancy, beta) are cleared. Calm-market
+avoidance (btc-LOW) is the clean risk-off signal — the fade should stand down when the market is quiet.
