@@ -1,0 +1,6 @@
+timestamp_utc,phase,config,trials,outcome
+2026-08-11T00:08,0,"data audit: 6 candle files + tape + buckets, spans/overlaps/NaN/gaps",0,"zero overlap confirmed; tape starts 4.1d after candles end"
+2026-08-11T01:20,0,"leakage assertion: 8 features x {aligned, +1 bar, -1 bar} at h=5",0,"PASS - forward collapses on 8/8, backward amplifies on 6/8"
+2026-08-11T01:35,1,"cost floor, assumed R2 grid {0.1,0.3,0.5,1.0}% x 5 horizons x 3 tiers x 2 exec",0,"PASS on assumed R2 - not decision-grade"
+2026-08-11T02:10,1,"Stage A univariate IC: 9 features x 5 horizons x {ALL,HIGH,MID,LOW}",130,"130 trials logged; best real cell ratio 0.32 vs gate 1.5"
+2026-08-11T02:25,1,"verdict with eff_n>=100 + Bonferroni + day-consistency gates",0,"FAIL - stop per spec 9"
