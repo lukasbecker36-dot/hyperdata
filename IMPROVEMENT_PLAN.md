@@ -298,10 +298,20 @@ half, flat size): **same total P&L as trading everything, from half the trades, 
 (2.40 vs 1.61), a smaller drawdown (-200 vs -298), and the least capital.** The shallow half contributes
 ~nothing (its aggregate net is slightly negative here), so dropping it is close to free.
 
-Verdict: **pierce is the first robust, deployable improvement of the whole search.** Recommend the deep-
-pierce FILTER (skip breakouts whose pierce is below the trailing median) as the primary change — it
-improves Sharpe AND cuts drawdown AND cuts capital at once — optionally with a mild pierce up-tilt if
-capital is available. First real live-worthy change surfaced since the ats/rv/spread tuning.
+Sizing WITHIN the deep-pierce filter (follow-up run — resolves flat vs ats):
+
+  DEEP-only + flat        1213 tr  P&L +692   maxDD -200  ret/DD 3.46  holdoutSh +2.94  margin $2233
+  DEEP-only + ats         1213 tr  P&L +1070  maxDD -187  ret/DD 5.72  holdoutSh +2.50  margin $3040
+  DEEP-only + pierce-tilt 1213 tr  P&L +1468  maxDD -363  ret/DD 4.05  holdoutSh +3.86  margin $4280
+
+Verdict: **pierce is the first robust, deployable improvement of the whole search — and the change is a
+FILTER, not a sizing switch.** Keep ats sizing: **DEEP-only + ats dominates deep+flat** (P&L +1070 vs
++692, ret/DD 5.72 vs 3.46, lower drawdown, modestly more capital) and beats the live ALL+ats (ret/DD 4.06
+→ 5.72, holdout Sharpe 1.48 → 2.50) from half the trades. So: **skip breakouts whose pierce is below the
+trailing median, keep ats sizing on the rest.** Note "deep pierce" = how far the close pushed BEYOND the
+prior 24h range (price overshoot) — NOT dollar-volume size (weak) and NOT ats (whale composition, a
+separate additive lever). Pierce-tilt (up-size on deep) gives the highest holdout Sharpe (+3.86) but a
+bigger drawdown/capital — an option only if capital-rich. First live-worthy change since ats/rv/spread.
 
 ### Fade edge conditioning — hour / session / listing-age / archetype (`analysis/regime_conditioning.py`)
 
