@@ -605,3 +605,24 @@ a multi-bar move) is non-monotone and unstable OOS (5/8 months) — no clean edg
 half than raw pierce (+16 vs +47), so normalizing by vol does not improve stationarity — raw pierce is
 the better form. Net: no second geometry gate, but a useful sharpening — the edge is specifically the
 OVERSHOOT DEPTH, not the setup shape or the move concentration. Pierce stands alone, in raw form.
+
+### Idiosyncratic vs market-driven — the fade is a MARKET-STRESS strategy (`analysis/idiosyncratic.py`)
+
+Residualized each breakout against BTC (trailing 168-bar beta, causal). Hypothesis (idiosyncratic reverts
+cleaner) REFUTED — the opposite holds, robustly:
+  idiosyncratic ratio:  market-driven (idio-LOW) +55.7 (t=5.0) > coin-specific (idio-HIGH) +19.6
+  BTC move at entry:    market MOVING (btc-HIGH) +49.2 (t=4.0) > calm market (btc-LOW) -5.9
+
+Both pass the hard tests: **7/7 months positive, stable across both sample halves** (idio-LOW 1st +41/2nd
++69; btc-HIGH +46/+52). Third independent confirmation of one mechanism — clustering, HMM high-vol regime,
+and now market-driven/BTC-moving all say the fade is **market-stress mean-reversion**: it works on
+market-wide flushes, not isolated idiosyncratic blips (those are more likely real coin news).
+
+Double-sort vs pierce: partly independent. pierce-HIGH holds across all idio rows (+98/+26/+74); idio-LOW
+holds across all pierce cols and **rescues shallow-pierce trades** (+27 where pierce-LOW alone is dead).
+So a **market-level volatility gate** ("fade only when BTC is moving") is a candidate lever distinct from
+the per-coin rv gate. CAVEATS before trusting it: (1) needs a double-sort vs the coin-rv gate (btc_move
+correlates with coin rv, already gated) to confirm it adds market-level info beyond it; (2) needs a beta
+check — "fade harder when BTC moves" could be partly market-timing/beta like the MA-pullback, not pure
+reversion; (3) equity/return-DD test. Promising second conditioner, but pierce remains the cleaner,
+proven-deployable one.
