@@ -21,7 +21,7 @@ Run TWO instances to compare timeframes live:
   python paper_bot.py --interval 5m
   python paper_bot.py --interval 15m
 """
-import argparse, json, os, sys, time, math, csv
+import argparse, bisect, json, os, sys, time, math, csv
 from datetime import datetime, timezone
 import urllib.request
 try:
@@ -51,6 +51,11 @@ BOLL_K        = 2.5          # z-score band for entry: fade |z| >= BOLL_K
 SIZE_REF      = 2.0          # ats-ratio mapping to 1.0x notional (a typical spike)
 SIZE_MIN      = 0.5          # notional multiplier floor
 SIZE_MAX      = 3.0          # notional multiplier cap
+PIERCE_REF    = 0.5          # pierce percentile that maps to a 1.0x tilt (the median)
+PIERCE_MAX    = 2.0          # cap on the pierce leg alone
+MULT_MAX      = 4.0          # cap on ats x pierce. Unclipped the product spans 0.25-6.0x;
+                             # 0.5 x $24 = $12 clears MIN_NOTIONAL and 4.0 x $24 = $96 is
+                             # the largest single bet the liquidation sizing still covers
 # fallback rv thresholds if calibration fails (computed 2026-07 from historical data)
 RV_FALLBACK   = {"5m": 0.00256, "15m": 0.00514}
 
@@ -120,6 +125,9 @@ class Bot:
         # move it without touching the others; defaults to the module constant, so the
         # paper arms are unchanged.
         self.rv_pctile = RV_PCTILE
+        # pierce-depth sizing (analysis/pierce_deploy.py). Off unless an arm turns it on.
+        self.size_by_pierce = False
+        self.pierce_dist = []
         # what the gate WOULD be at the reference 60th percentile. Only differs from
         # rv_thr when rv_pctile has been moved, and it is what makes the added trades
         # separable afterwards: rv < rv_thr_ref means the old gate would have skipped it.
@@ -257,8 +265,17 @@ class Bot:
             brk = 1 if z >= BOLL_K else (-1 if z <= -BOLL_K else 0)   # overbought=+1 (fade short)
         else:
             brk = 1 if c[i] > prior_h else (-1 if c[i] < prior_l else 0)
+        # pierce: how far the close pushed BEYOND the prior 24h range, as a fraction.
+        # Signed so it is always >= 0 for a real breakout in either direction, and it is
+        # entirely determined by the closed bar, so it is available at decision time.
+        pierce = None
+        if brk > 0 and prior_h > 0:
+            pierce = (c[i] - prior_h) / prior_h
+        elif brk < 0 and prior_l > 0:
+            pierce = (prior_l - c[i]) / prior_l
         return {"close": c[i], "close_ms": closed[i]["T"], "prior_h": prior_h, "prior_l": prior_l,
-                "ma": ma, "z": z, "vratio": vratio, "rv": rv, "brk": brk, "ats_ratio": ats_ratio}
+                "ma": ma, "z": z, "vratio": vratio, "rv": rv, "brk": brk,
+                "ats_ratio": ats_ratio, "pierce": pierce}
 
     # ---------- strategy predicates ----------
     # These three are the entire strategy surface: what to enter, when to exit, how big.
@@ -289,15 +306,38 @@ class Bot:
         return None
 
     def size_mult(self, feat):
-        """avg-trade-size sizing: big-trade ('whale') spikes fade harder -> bet more."""
+        """Notional multiplier: avg-trade-size tilt, optionally times a pierce-depth tilt.
+
+        ats: big-trade ("whale") spikes fade harder -> bet more.
+
+        pierce: how far the breakout closed beyond the prior 24h range. The deepest
+        third earns +86.5bps at 15m against a +45.6 baseline (t=+5.30), positive in every
+        month, stable across halves, and it sorts INSIDE every rv bucket rather than
+        proxying the rv gate (analysis/pierce_transfer.py). Applied as a tilt rather than
+        a filter: the 1h study found the shallow terciles break even and so are free to
+        drop, but at 15m they earn +28.4 and +21.9bps, and this arm runs at 2.2 of 40
+        position slots -- capacity is free, so a smaller book costs P&L for nothing
+        (analysis/pierce_deploy.py).
+
+        The pierce leg is a PERCENTILE rank against recent signals, calibrated the same
+        way as the rv threshold, so the tilt is scale-free across coins and re-centres
+        itself as market conditions move. The product is clipped: unclipped it spans
+        0.25-6.0x, whose floor would fall under MIN_NOTIONAL and whose ceiling is a
+        larger single bet than the liquidation work assumes.
+        """
+        m = 1.0
         if self.size_by_ats and feat.get("ats_ratio"):
-            return min(SIZE_MAX, max(SIZE_MIN, feat["ats_ratio"] / SIZE_REF))
-        return 1.0
+            m *= min(SIZE_MAX, max(SIZE_MIN, feat["ats_ratio"] / SIZE_REF))
+        if self.size_by_pierce and feat.get("pierce") is not None and self.pierce_dist:
+            pct = bisect.bisect_left(self.pierce_dist, feat["pierce"]) / len(self.pierce_dist)
+            m *= min(PIERCE_MAX, max(SIZE_MIN, pct / PIERCE_REF))
+        return min(MULT_MAX, max(SIZE_MIN, m))
 
     # ---------- calibration ----------
     def calibrate(self):
         self.log(f"calibrating rv threshold from last {CALIB_DAYS}d ...")
         rvs = []
+        pierces = []
         lb = int(CALIB_DAYS * 24 * 60 / self.bar_min)
         syms = [s for s, t in self.universe.items() if t in self.tiers]
         for k, s in enumerate(syms):
@@ -316,6 +356,13 @@ class Bot:
                     rets=[math.log(c[j]/c[j-1]) for j in range(i-self.win+1,i+1)]
                     mean=sum(rets)/len(rets); rv=(sum((r-mean)**2 for r in rets)/len(rets))**0.5
                     rvs.append(rv)
+                    # pierce depth of the same historical signals, so the sizing tilt
+                    # ranks each live signal against a real recent distribution rather
+                    # than a hard-coded constant
+                    if c[i] > ph and ph > 0:
+                        pierces.append((c[i]-ph)/ph)
+                    elif c[i] < pl and pl > 0:
+                        pierces.append((pl-c[i])/pl)
             except Exception:
                 pass
             time.sleep(0.05)
@@ -329,6 +376,16 @@ class Bot:
                      f"@{self.rv_pctile:.0%}  (from {len(rvs)} signals){extra}")
         else:
             self.log(f"calibration thin ({len(rvs)}), using fallback rv threshold {self.rv_thr:.6f}")
+        if len(pierces) > 200:
+            self.pierce_dist = sorted(pierces)
+            q = self.pierce_dist
+            self.log(f"calibrated pierce distribution: {len(q)} signals, "
+                     f"median {q[len(q)//2]:.5f}, p90 {q[int(len(q)*0.9)]:.5f}"
+                     + ("" if self.size_by_pierce else "  (logged only, sizing off)"))
+        elif self.size_by_pierce:
+            self.log(f"pierce calibration thin ({len(pierces)}) — pierce sizing DISABLED "
+                     f"for this cycle rather than run on a guessed distribution")
+            self.pierce_dist = []
 
     # ---------- trade ops ----------
     def open_pos(self, sym, brk, feat):

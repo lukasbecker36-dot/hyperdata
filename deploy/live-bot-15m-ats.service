@@ -105,6 +105,38 @@ EnvironmentFile=/etc/hyperdata/live.env
 # revert to 0.60. Expected ~10 extra trades/day; if the band is truly flat the cost is
 # fees only, about $6/month, and the downside at the worst band ever observed is ~$14.
 #
+# --pierce-size multiplies the notional by a PIERCE-DEPTH tilt: the percentile rank of how
+# far the breakout closed beyond the prior 24h range, against a distribution calibrated
+# from the last 15d of signals the same way the rv threshold is.
+#
+# This is the first robust NEW positive result of the conditioning search, and it survives
+# the two tests that killed everything else here. At 15m (the frequency this arm actually
+# trades, not the 1h the research was done on) the deep tercile earns +86.5bps against a
+# +45.6 baseline, t=+5.30, positive in 3/3 months, halves +84.8 / +88.4. It is not the rv
+# gate in disguise: correlation is only +0.36 at 15m and it sorts INSIDE every rv bucket
+# (rv-LOW +60 vs +24, rv-MID +46 vs +6, rv-HIGH +130 vs +49). It also lifts every rv band
+# including the 40-60th one the gate change just added (+58.3 deep vs +25.1 shallow), so
+# the two changes are complementary rather than competing. See analysis/pierce_transfer.py.
+#
+# Deployed as SIZING, not as the filter the 1h study recommended, and that difference turns
+# on one number. The filter case rests on shallow trades being free to drop: at 1h they earn
+# +1.1 and -3.8bps, at 15m they earn +28.4 and +21.9. Dropping them here would discard 1,126
+# trades averaging +29.9bps -- $118 of P&L on that sample -- to buy a smaller book this arm
+# does not need at 2.2 of 40 slots. Priced on identical entries at equal average capital:
+# ats-only $+278.55 (ret/DD 7.37), ats x pierce $+355.48 (ret/DD 9.51, drawdown UNCHANGED at
+# -37.4 vs -37.8), deep-pierce filter $+161.46 (ret/DD 10.29 but 42% less P&L).
+#
+# Base stays at $24. The pierce leg is percentile-centred so the combined mean multiplier
+# only moves 1.513 -> 1.586, a 4.8% exposure change: one variable moves, not two. The product
+# is capped at 4.0x, giving $12 at the floor (clear of the $10 MIN_NOTIONAL) and $96 at the
+# ceiling. Both legs fail safe -- an uncalibrated pierce distribution or a missing pierce
+# falls back to ats-only sizing rather than guessing.
+#
+# CAVEAT worth remembering when reading the result: the one sample overlapping live trading
+# (784 gated tape-window events) did NOT confirm, though the ungated version of the same
+# dates did (n=4,833, t=+2.36). pierce and pierce_pct are logged on every trade whether or
+# not sizing is on, so this stays measurable either way.
+#
 # --daily-loss-limit deliberately LEFT at 15, and this change makes it bind MORE often
 # (~56% more trades; it already reached -$11.30 of -$15 on 2026-08-08). Left alone
 # deliberately -- one variable at a time -- but it is now the most likely thing to
@@ -120,7 +152,8 @@ ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --max-per-side 20 \
     --daily-loss-limit 15 \
     --ab-rest-pct 0.5 \
-    --rv-pctile 0.40
+    --rv-pctile 0.40 \
+    --pierce-size
 Restart=always
 RestartSec=15
 StandardOutput=append:/opt/hyperdata/live_15m_ats/service.out

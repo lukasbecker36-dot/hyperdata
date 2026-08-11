@@ -46,7 +46,7 @@ cannot withdraw, which is what you want on a server.
   python3 live_bot_ats.py --datadir ./live_15m_ats               # dry run
   python3 live_bot_ats.py --datadir ./live_15m_ats --live        # arm it
 """
-import argparse, csv, hashlib, json, math, os, time
+import argparse, bisect, csv, hashlib, json, math, os, time
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
 from datetime import datetime, timezone
 
@@ -223,11 +223,11 @@ class LiveBot(Bot):
     LIVE_COLS = ["fee_usd", "entry_wait_s", "exit_wait_s", "exit_taker", "repegs", "sz",
                  "vpin30", "vpin60", "adverse_ofi",
                  "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier",
-                 "ats_ratio", "ab_arm", "rv", "rv_thr_ref"]
+                 "ats_ratio", "ab_arm", "rv", "rv_thr_ref", "pierce", "pierce_pct"]
     MISS_COLS = ["time", "symbol", "side", "px", "sz", "rested_s", "vratio", "rv",
                  "ats_ratio", "vpin30", "vpin60", "adverse_ofi",
                  "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier", "ab_arm",
-                 "rv_thr_ref"]
+                 "rv_thr_ref", "pierce", "pierce_pct"]
 
     @staticmethod
     def _q3(d):
@@ -265,7 +265,21 @@ class LiveBot(Bot):
         if with_rv:
             out.append("" if d.get("rv") is None else f"{d['rv']:.6f}")
         out.append("" if d.get("rv_thr_ref") is None else f"{d['rv_thr_ref']:.6f}")
+        # pierce and its percentile rank, so the sizing tilt stays separable afterwards
+        out.append("" if d.get("pierce") is None else f"{d['pierce']:.6f}")
+        out.append("" if d.get("pierce_pct") is None else f"{d['pierce_pct']:.4f}")
         return out
+
+    def _pierce_pct(self, pierce):
+        """Percentile rank of this signal's pierce against the calibrated distribution.
+
+        Logged on every trade regardless of whether pierce SIZING is on, so the effect
+        stays measurable on live fills either way -- the same reason ats_ratio kept being
+        logged through the flat-sizing period, which is what later made it testable.
+        """
+        if pierce is None or not self.pierce_dist:
+            return None
+        return bisect.bisect_left(self.pierce_dist, pierce) / len(self.pierce_dist)
 
     @staticmethod
     def _ab_flip(sym):
@@ -770,6 +784,7 @@ class LiveBot(Bot):
             "queue_usd": q_usd, "spread_bps": spread_bps, "crossed": int(cross),
             "tier": self.universe.get(sym), "ab_arm": ab_arm,
             "rv_thr_ref": self.rv_thr_ref,
+            "pierce": feat.get("pierce"), "pierce_pct": self._pierce_pct(feat.get("pierce")),
             "queue_ratio": (q_usd / notional) if (q_usd is not None and notional) else None,
         }
 
@@ -825,6 +840,7 @@ class LiveBot(Bot):
             "tier": pend.get("tier"), "ats_ratio": pend.get("ats_ratio"),
             "ab_arm": pend.get("ab_arm", ""), "rv": pend.get("rv"),
             "rv_thr_ref": pend.get("rv_thr_ref"),
+            "pierce": pend.get("pierce"), "pierce_pct": pend.get("pierce_pct"),
             # kept so reconcile can cancel the entry order if this turns out to be a
             # phantom fill rather than a real position
             "oid": pend.get("oid"),
@@ -1156,6 +1172,7 @@ class LiveBot(Bot):
             # adopted positions were not placed by the entry path, so they were never
             # assigned an arm and must not be counted in the experiment
             "ab_arm": "", "rv": None, "rv_thr_ref": None,
+            "pierce": None, "pierce_pct": None,
             "adopted": True, "adopt_ms": now_ms(),
         }
         held_h = (now_ms() - entry_ms) / 3600000
@@ -1267,6 +1284,8 @@ class LiveBot(Bot):
         if AB_REST_PCT > 0:
             xs += f" A/B {AB_REST_PCT:.0%}-rest"
         szs = (f"x({SIZE_MIN:g}-{SIZE_MAX:g} ats)" if self.size_by_ats else "FLAT")
+        if self.size_by_pierce:
+            szs += f" x pierce (cap {paper_bot.MULT_MAX:g})"
         self.log(f"=== live bot [15m-ats] {mode} | notional=${self.notional} {szs} "
                  f"lev={self.leverage}x isolated | {xs} entry_window={ENTRY_WINDOW_S}s "
                  f"exit_grace={EXIT_GRACE_S}s | caps: {self.max_positions}pos "
@@ -1347,6 +1366,12 @@ if __name__ == "__main__":
                          f"(default {paper_bot.RV_PCTILE:g}). Lowering it adds lower-"
                          "volatility signals; see analysis/rv_gate.py, which prices the "
                          "40-60 band at +34.7bps net on 854 events.")
+    ap.add_argument("--pierce-size", action="store_true",
+                    help="multiply the notional by a pierce-depth tilt (percentile rank "
+                         "of how far the breakout closed beyond the prior 24h range). "
+                         "Deep tercile earns +86.5bps at 15m vs a +45.6 baseline, t=+5.30, "
+                         "positive every month; see analysis/pierce_transfer.py. pierce is "
+                         "logged either way, so leaving this off still accumulates evidence.")
     ap.add_argument("--tape-dir", default=None,
                     help=f"tape logger output dir, for shadow flow-toxicity logging "
                          f"(default {TAPE_DIR}). Features are recorded, never acted on.")
@@ -1361,6 +1386,7 @@ if __name__ == "__main__":
             max_positions=a.max_positions, daily_loss_limit=a.daily_loss_limit,
             leverage=a.leverage, size_by_ats=not a.flat_size, tape_dir=a.tape_dir,
             max_per_side=a.max_per_side)
+    bot.size_by_pierce = a.pierce_size
     if a.rv_pctile is not None:
         if not 0.0 <= a.rv_pctile <= 1.0:
             ap.error("--rv-pctile must be between 0 and 1")
