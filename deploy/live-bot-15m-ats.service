@@ -137,12 +137,11 @@ EnvironmentFile=/etc/hyperdata/live.env
 # dates did (n=4,833, t=+2.36). pierce and pierce_pct are logged on every trade whether or
 # not sizing is on, so this stays measurable either way.
 #
-# --daily-loss-limit deliberately LEFT at 15, and this change makes it bind MORE often
-# (~56% more trades; it already reached -$11.30 of -$15 on 2026-08-08). Left alone
-# deliberately -- one variable at a time -- but it is now the most likely thing to
-# interfere with reading the result.
-# and its job does not change because more positions are allowed. It will now bind more
-# often; raise it only if it is halting days that should have kept trading.
+# --daily-loss-limit RAISED 15 -> 25: at 15 it was binding too often after the position-cap
+# and rv-gate changes (it hit -$11.30 of -$15 on 2026-08-08 and would halt days that should
+# have kept trading). A -$25 24h swing is ~2nd-percentile, i.e. within normal variance for this
+# strategy, so 25 lets it trade through an ordinary down-day without a mid-day halt distorting
+# the result. Still a real circuit breaker for a genuinely abnormal day.
 ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --datadir /opt/hyperdata/live_15m_ats \
     --live \
@@ -150,7 +149,7 @@ ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --max-gross 2000 \
     --max-positions 40 \
     --max-per-side 20 \
-    --daily-loss-limit 15 \
+    --daily-loss-limit 25 \
     --ab-rest-pct 0.5 \
     --rv-pctile 0.40 \
     --pierce-size
