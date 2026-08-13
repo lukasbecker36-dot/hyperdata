@@ -663,3 +663,23 @@ free), but calm-market trades are below-average yet still net-positive (dropping
 break-even trades, not merely weaker ones. **DEPLOY: deep-pierce filter + ats. Market-vol: a validated
 edge but keep it OUT as a hard filter — revisit only as a soft sizing tilt (size down in calm markets)
 later.** This is the final, capital-efficient config of the whole search.
+
+### Late conditional exit — the one exit rule that doesn't hurt, but marginal (`analysis/late_exit.py`)
+
+Followed the "time-to-backstop + volume + persistent adverse" idea. Result depends entirely on TIMING:
+  - bail with 4h+ left: destroys value (-51 to -144% total) — with runway the reversion still comes.
+  - bail with 1-2h left on a still-underwater trade: slightly BEATS holding to backstop.
+Best cell (k>=7 / 1h left, >2% underwater, still making new lows): total +573% -> +616% (+43%, +7.5%),
+ret/|DD| 4.12 -> 4.72. **The volume-surge condition does NOT help** — adverse+still-falling (+43) beats
+adverse+volume (+17); consistent with early_exit.py (volume is a bad exit signal). So it's *runway running
+out + still drifting away*, not volume.
+
+Why this is the only non-harmful exit while % stops destroy the edge: a % stop fires at the MAXIMUM adverse
+excursion (the overshoot bottom) — exactly where reversion is about to happen, so it sells the bottom. This
+fires only when reversion has DEMONSTRABLY not come (hour 7, still new-lowing) and the backstop will dump
+the trade at market in 1h anyway — it trims a dead trade's last hour, it does not cut a reverting one.
+
+BUT marginal and not deploy-worthy: +7.5% on total, ret/DD +15%, yet only **5/8 months** (03/04/12
+negative), June-dominated, and one of ~24 swept cells. Verdict: keep the clean no-stop design; the value
+here is the *understanding* — the backstop losers are trades that genuinely never revert (tail nearly
+irreducible, per early_exit.py), and there is only a tiny sliver in exiting them 1h before the backstop does.
