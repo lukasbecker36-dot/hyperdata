@@ -202,7 +202,7 @@ def cmd_positions():
             continue
         oldest = min((p.get("entry_ms", 0) for p in pos.values()), default=0)
         fund = _funding_open(HL_ADDR, oldest - 1000) if oldest else {}
-        tot, n_val, ftot = 0.0, 0, 0.0
+        tot, n_val, ftot, gross = 0.0, 0, 0.0, 0.0
         lines = []
         for sym, p in pos.items():
             side = "SHORT" if p.get("dir", 0) < 0 else "LONG"
@@ -213,13 +213,21 @@ def cmd_positions():
             fs = f"  fund {fu:+.3f}" if fu else ""
             if fu:
                 ftot += fu
+            # notional is worth showing per line now that ats x pierce sizing spans
+            # $12-$96: two positions in the same coin at the same price are no longer
+            # the same bet, and gross exposure is the number margin is consumed against
+            ntl = p.get("notional") or 0.0
+            gross += ntl
+            ns = f"  ${ntl:,.0f}" if ntl else ""
             if usd is None:
-                lines.append(f"  {side} {sym} @ {entry:.6g}  ({held_h:.1f}h){fs}")
+                lines.append(f"  {side} {sym} @ {entry:.6g}{ns}  ({held_h:.1f}h){fs}")
             else:
                 tot += usd; n_val += 1
-                lines.append(f"  {side} {sym} @ {entry:.6g}  ({held_h:.1f}h)  "
+                lines.append(f"  {side} {sym} @ {entry:.6g}{ns}  ({held_h:.1f}h)  "
                              f"{usd:+.2f} ({bps:+.0f}b){fs}")
         hdr = f"<b>[{label}]</b> {len(pos)} open"
+        if gross:
+            hdr += f"  ${gross:,.0f} gross"
         if n_val:
             grand += tot + ftot
             hdr += f"  unreal {tot:+.2f}"
