@@ -356,13 +356,19 @@ class Bot:
                     rets=[math.log(c[j]/c[j-1]) for j in range(i-self.win+1,i+1)]
                     mean=sum(rets)/len(rets); rv=(sum((r-mean)**2 for r in rets)/len(rets))**0.5
                     rvs.append(rv)
-                    # pierce depth of the same historical signals, so the sizing tilt
-                    # ranks each live signal against a real recent distribution rather
-                    # than a hard-coded constant
+                    # pierce depth of the same historical signals, PAIRED WITH rv so the
+                    # distribution can be restricted to signals the bot would actually
+                    # trade. Ranking against every breakout instead made the tilt run ~20%
+                    # long: pierce correlates with rv, the rv gate keeps the top 60%, so
+                    # traded signals sat high in a distribution built from a broader
+                    # population (live median pierce_pct 0.72 against a designed 0.50).
+                    pc = None
                     if c[i] > ph and ph > 0:
-                        pierces.append((c[i]-ph)/ph)
+                        pc = (c[i]-ph)/ph
                     elif c[i] < pl and pl > 0:
-                        pierces.append((pl-c[i])/pl)
+                        pc = (pl-c[i])/pl
+                    if pc is not None:
+                        pierces.append((rv, pc))
             except Exception:
                 pass
             time.sleep(0.05)
@@ -376,14 +382,17 @@ class Bot:
                      f"@{self.rv_pctile:.0%}  (from {len(rvs)} signals){extra}")
         else:
             self.log(f"calibration thin ({len(rvs)}), using fallback rv threshold {self.rv_thr:.6f}")
-        if len(pierces) > 200:
-            self.pierce_dist = sorted(pierces)
+        # restrict to signals that clear the rv gate -- the population actually traded
+        gated = [pc for rv, pc in pierces if rv >= self.rv_thr]
+        if len(gated) > 200:
+            self.pierce_dist = sorted(gated)
             q = self.pierce_dist
             self.log(f"calibrated pierce distribution: {len(q)} signals, "
-                     f"median {q[len(q)//2]:.5f}, p90 {q[int(len(q)*0.9)]:.5f}"
+                     f"median {q[len(q)//2]:.5f}, p90 {q[int(len(q)*0.9)]:.5f} "
+                     f"[rv-gated: {len(gated)} of {len(pierces)}]"
                      + ("" if self.size_by_pierce else "  (logged only, sizing off)"))
         elif self.size_by_pierce:
-            self.log(f"pierce calibration thin ({len(pierces)}) — pierce sizing DISABLED "
+            self.log(f"pierce calibration thin ({len(gated)}) — pierce sizing DISABLED "
                      f"for this cycle rather than run on a guessed distribution")
             self.pierce_dist = []
 
