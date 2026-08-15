@@ -224,11 +224,11 @@ class LiveBot(Bot):
     LIVE_COLS = ["fee_usd", "entry_wait_s", "exit_wait_s", "exit_taker", "repegs", "sz",
                  "vpin30", "vpin60", "adverse_ofi",
                  "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier",
-                 "ats_ratio", "ab_arm", "rv", "rv_thr_ref", "pierce", "pierce_pct", "term_ofi", "term_n"]
+                 "ats_ratio", "ab_arm", "rv", "rv_thr_ref", "pierce", "pierce_pct", "term_ofi", "term_n", "funding_usd"]
     MISS_COLS = ["time", "symbol", "side", "px", "sz", "rested_s", "vratio", "rv",
                  "ats_ratio", "vpin30", "vpin60", "adverse_ofi",
                  "queue_usd", "queue_ratio", "spread_bps", "crossed", "tier", "ab_arm",
-                 "rv_thr_ref", "pierce", "pierce_pct", "term_ofi", "term_n"]
+                 "rv_thr_ref", "pierce", "pierce_pct", "term_ofi", "term_n", "funding_usd"]
 
     @staticmethod
     def _q3(d):
@@ -271,6 +271,7 @@ class LiveBot(Bot):
         out.append("" if d.get("pierce_pct") is None else f"{d['pierce_pct']:.4f}")
         out.append("" if d.get("term_ofi") is None else f"{d['term_ofi']:.4f}")
         out.append("" if d.get("term_n") is None else str(int(d["term_n"])))
+        out.append("" if d.get("funding_usd") is None else f"{d['funding_usd']:.6f}")
         return out
 
     def _pierce_pct(self, pierce):
@@ -490,8 +491,10 @@ class LiveBot(Bot):
         ntl = p.get("notional") or 0.0
         net = (net_usd / ntl) if ntl else 0.0
         gross = (pnl / ntl) if ntl else 0.0
-        self.cum_pnl += net_usd
-        self.day_pnl += net_usd
+        fund = self._funding_since(sym, p["entry_ms"], now_ms())
+        p["funding_usd"] = fund
+        self.cum_pnl += net_usd + (fund or 0.0)
+        self.day_pnl += net_usd + (fund or 0.0)
         self.n_closed += 1
         self.n_win += 1 if net_usd > 0 else 0
         self.n_liq += 1 if liq else 0
@@ -509,7 +512,8 @@ class LiveBot(Bot):
                 *self._q3(p),
                 ("" if p.get("ats_ratio") is None else f"{p['ats_ratio']:.4f}"),
                 *self._tail(p)])
-        self.notify(f"{reason.upper()} <b>{sym}</b>\n booked ${net_usd:+.2f} (fee ${fee:.3f}) hold={hold_h:.1f}h\n cum=${self.cum_pnl:+.2f}")
+        fs = "" if fund is None else f" funding ${fund:+.3f}"
+        self.notify(f"{reason.upper()} <b>{sym}</b>\n booked ${net_usd:+.2f} (fee ${fee:.3f}){fs} hold={hold_h:.1f}h\n total ${net_usd + (fund or 0.0):+.2f}  cum=${self.cum_pnl:+.2f}")
         self._save_state()
         return net_usd
 
@@ -589,6 +593,38 @@ class LiveBot(Bot):
             return sum(float(f.get("fee", 0)) for f in fills if f.get("coin") == sym)
         except Exception as e:
             self.log(f"WARN fills {sym}: {e}")
+            return None
+
+    def _funding_since(self, sym, since_ms, until_ms=None):
+        """USD funding accrued on this coin while the position was open.
+
+        Hyperliquid settles funding HOURLY as a separate ledger entry; a fill's closedPnl
+        excludes it. The trade log is built from fills, so every P&L figure this bot has
+        ever written has been price-only. Over the live book so far that omitted +$2.49
+        against a booked +$3.19 -- a 78% understatement.
+
+        It is not incidental: the strategy fades in the direction that COLLECTS carry. An
+        up-breakout with positive funding means longs pay and we short; a down-breakout
+        with negative funding means shorts pay and we long. Both sides earn it by
+        construction, and it is worth far more on the long side (+3.8bps/trade against
+        +0.2) because dumps with deeply negative funding are rarer and more extreme.
+
+        Positive = received. Returns None on failure so the caller can log a blank rather
+        than a false zero.
+        """
+        if not self.live:
+            return None
+        try:
+            ev = self.info.user_funding_history(self.address, int(since_ms) - 1000,
+                                                int(until_ms) if until_ms else None)
+            tot = 0.0
+            for x in ev or []:
+                d = x.get("delta") or {}
+                if d.get("coin") == sym and d.get("type", "funding") == "funding":
+                    tot += float(d.get("usdc", 0) or 0)
+            return tot
+        except Exception as e:
+            self.log(f"WARN funding {sym}: {e}")
             return None
 
     # ---------- queue position (ported from provision_bot.py / mexc_api.py) ----------
@@ -1002,8 +1038,12 @@ class LiveBot(Bot):
         fee = fee_usd / p["notional"] if p["notional"] else 0.0
         net = gross - fee
         pnl = p["notional"] * gross - fee_usd
-        self.cum_pnl += pnl
-        self.day_pnl += pnl
+        # funding settles hourly and is NOT in closedPnl. pnl_usd stays price-only so
+        # historical rows keep their meaning; cum_pnl carries the total return.
+        fund = self._funding_since(sym, p["entry_ms"], now_ms())
+        p["funding_usd"] = fund
+        self.cum_pnl += pnl + (fund or 0.0)
+        self.day_pnl += pnl + (fund or 0.0)
         self.n_closed += 1
         self.n_win += 1 if pnl > 0 else 0
         hold_h = (now_ms() - p["entry_ms"]) / 3600000
@@ -1025,12 +1065,16 @@ class LiveBot(Bot):
                 ("" if p.get("ats_ratio") is None else f"{p['ats_ratio']:.4f}"),
                 *self._tail(p)])
         self.log(f"CLOSE {sym:12s} {reason:14s} net={net*1e4:+6.1f}bps pnl=${pnl:+.3f} "
-                 f"fee=${fee_usd:.3f} hold={hold_h:.1f}h  cum=${self.cum_pnl:+.2f} "
+                 f"fee=${fee_usd:.3f} fund=${(fund or 0.0):+.3f} hold={hold_h:.1f}h  "
+                 f"cum=${self.cum_pnl:+.2f} "
                  f"day=${self.day_pnl:+.2f} trades={self.n_closed}")
+        fstr = "" if fund is None else f"  funding=${fund:+.3f}"
+        tot = pnl + (fund or 0.0)
         emoji = "\U0001F534" if pnl <= 0 else "\U0001F535"      # red loss / blue win
         self.notify(f"{emoji} CLOSE <b>{sym}</b> ({reason})\n"
-                    f"net={net*1e4:+.1f}bps  pnl=${pnl:+.3f}  fee=${fee_usd:.3f}  hold={hold_h:.1f}h\n"
-                    f"cum=${self.cum_pnl:+.2f}  day=${self.day_pnl:+.2f}  win={self._winrate():.0f}%")
+                    f"net={net*1e4:+.1f}bps  pnl=${pnl:+.3f}  fee=${fee_usd:.3f}{fstr}  hold={hold_h:.1f}h\n"
+                    f"total=${tot:+.3f}  cum=${self.cum_pnl:+.2f}  "
+                    f"day=${self.day_pnl:+.2f}  win={self._winrate():.0f}%")
         self._save_state()
 
     # ---------- order management (runs between bars) ----------
