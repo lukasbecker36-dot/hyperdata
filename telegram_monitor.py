@@ -43,6 +43,11 @@ from datetime import datetime, timezone
 import telegram_notify as tg
 
 INFO_URL = "https://api.hyperliquid.xyz/info"
+# Public account address, for reading accrued funding on open positions. Deliberately NOT
+# sourced from /etc/hyperdata/live.env: that file holds the API wallet's PRIVATE KEY, and
+# this is a read-only display bot that must never be able to sign. The address alone is
+# public on-chain data and is passed as its own Environment= line in the unit.
+HL_ADDR = os.environ.get("HL_ACCOUNT_ADDRESS", "").strip()
 # An arm whose bot log has not been touched in this long is treated as stopped. Uses the
 # LOG, not the state file: state is only written when a position opens or closes, so a
 # quiet-but-running bot has a stale state file and would be wrongly reported dead.
@@ -90,6 +95,37 @@ def _stale_min(datadir, interval):
         return None
 
 
+def _funding_open(addr, since_ms):
+    """coin -> USD funding accrued since since_ms, in one call. {} on any failure.
+
+    Realised P&L already carries funding: the bot books it per trade and cum_pnl includes
+    the historical backfill. Open positions did not -- _unreal is mark-to-mid on price
+    only -- so a position three hours into a hold was showing none of the carry it had
+    already earned. On a 3.1h mean hold that is roughly three hourly settlements, and it
+    is not always small: ACE and KAITO each accrued about $0.85 over the live book.
+    """
+    if not addr:
+        return {}
+    try:
+        req = urllib.request.Request(
+            INFO_URL,
+            data=json.dumps({"type": "userFunding", "user": addr,
+                             "startTime": int(since_ms)}).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            ev = json.load(r)
+        out = {}
+        for x in ev or []:
+            d = x.get("delta") or {}
+            c = d.get("coin", "")
+            if ":" in c or c.startswith("@"):        # xyz equity perps are not this bot's
+                continue
+            out[c] = out.get(c, 0.0) + float(d.get("usdc", 0) or 0)
+        return out
+    except Exception:
+        return {}
+
+
 def _unreal(p, mid):
     """Mark-to-mid P&L of one open position, in (usd, bps). Gross of the exit fee."""
     e = p.get("entry_px")
@@ -133,11 +169,15 @@ def cmd_status():
         pos = s.get("positions", {})
         age = _stale_min(d, interval)
         stale = age is not None and age > STALE_MIN
+        oldest = min((p.get("entry_ms", 0) for p in pos.values()), default=0)
+        fnd = _funding_open(HL_ADDR, oldest - 1000) if (pos and oldest) else {}
+        fu = sum(fnd.get(sym, 0.0) for sym in pos)
         u = sum(x for x in (_unreal(p, mids.get(sym))[0] for sym, p in pos.items())
                 if x is not None) if (mids and not stale) else None
         tail = f" | {len(pos)} open" if not stale else f" | STOPPED {age/60:.1f}h"
         if u is not None and pos:
-            tail += f", unreal ${u:+.2f} -> net ${cum+u:+.2f}"
+            tail += (f", unreal ${u:+.2f}" + (f" + fund ${fu:+.2f}" if fu else "")
+                     + f" -> net ${cum+u+fu:+.2f}")
         lines.append(f"<b>[{label}]</b> cum ${cum:+.2f} | "
                      f"{closed} closed, {wr:.0f}% win{tail}")
     return "\n".join(lines) or "no bots configured"
@@ -160,29 +200,38 @@ def cmd_positions():
         if not pos:
             out.append(f"<b>[{label}]</b> flat")
             continue
-        tot, n_val = 0.0, 0
+        oldest = min((p.get("entry_ms", 0) for p in pos.values()), default=0)
+        fund = _funding_open(HL_ADDR, oldest - 1000) if oldest else {}
+        tot, n_val, ftot = 0.0, 0, 0.0
         lines = []
         for sym, p in pos.items():
             side = "SHORT" if p.get("dir", 0) < 0 else "LONG"
             entry = p.get("entry_px")
             held_h = (int(time.time() * 1000) - p.get("entry_ms", 0)) / 3600000
             usd, bps = _unreal(p, mids.get(sym))
+            fu = fund.get(sym)
+            fs = f"  fund {fu:+.3f}" if fu else ""
+            if fu:
+                ftot += fu
             if usd is None:
-                lines.append(f"  {side} {sym} @ {entry:.6g}  ({held_h:.1f}h)")
+                lines.append(f"  {side} {sym} @ {entry:.6g}  ({held_h:.1f}h){fs}")
             else:
                 tot += usd; n_val += 1
                 lines.append(f"  {side} {sym} @ {entry:.6g}  ({held_h:.1f}h)  "
-                             f"{usd:+.2f} ({bps:+.0f}b)")
+                             f"{usd:+.2f} ({bps:+.0f}b){fs}")
         hdr = f"<b>[{label}]</b> {len(pos)} open"
         if n_val:
-            grand += tot
+            grand += tot + ftot
             hdr += f"  unreal {tot:+.2f}"
+            if ftot:
+                hdr += f" + fund {ftot:+.2f} = {tot+ftot:+.2f}"
         out.append(hdr + ":")
         out += lines
     if not mids:
         out.append("<i>(no prices — allMids call failed, so no unrealised shown)</i>")
     elif grand:
-        out.append(f"<b>total unrealised {grand:+.2f}</b>  (mark to mid, before exit fees)")
+        out.append(f"<b>total open {grand:+.2f}</b>  "
+                   f"(mark to mid + accrued funding, before exit fees)")
     return "\n".join(out) or "no bots configured"
 
 
