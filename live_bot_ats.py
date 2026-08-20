@@ -179,7 +179,7 @@ def round_sz(sz, sz_dec):
 class LiveBot(Bot):
     def __init__(self, datadir, live=False, notional=None, max_gross=1000.0,
                  max_positions=10, daily_loss_limit=50.0, leverage=3, size_by_ats=True,
-                 tape_dir=None, max_per_side=20):
+                 tape_dir=None, max_per_side=20, max_side_gross=300.0):
         # 15m, HIGH+MID, breakout trigger. size_by_ats is the A/B knob: the tape says
         # whale-sizing is the worst of {inverse, flat, ats}, but on only 5 days and with
         # nothing significant, so run flat as a second live arm and let real fills decide.
@@ -189,6 +189,7 @@ class LiveBot(Bot):
         self.max_gross = max_gross
         self.max_positions = max_positions
         self.max_per_side = max_per_side
+        self.max_side_gross = max_side_gross
         self.daily_loss_limit = daily_loss_limit
         self.leverage = int(leverage)
         if notional:
@@ -807,6 +808,24 @@ class LiveBot(Bot):
         gross = sum(p["notional"] for p in self.positions.values())
         mult = self.size_mult(feat)
         notional = self.notional * mult
+        # PER-SIDE GROSS. The count cap is a poor proxy now that ats x pierce sizing spans
+        # $12-$96: eight positions can be $96 or $768. On 2026-08-19 a market-wide rally
+        # met 20 shorts totalling $887 of one-directional gross against $383 of
+        # collateral -- 2.3x capital in a single bet -- and cost $42.42 in a day. The
+        # count cap bound at exactly 20 and did its job; the job was specified wrong.
+        #
+        # $300 is set from exposure arithmetic, not from fitting the event: a 5% adverse
+        # market move on $300 costs $15, which is the daily loss limit. That makes a
+        # correlated burst cost about what the daily brake already tolerates instead of
+        # three times it. It scales with collateral -- revisit if SPOT moves materially.
+        side_gross = sum(p["notional"] for p in self.positions.values()
+                         if p["dir"] == side_dir)
+        if side_gross + notional > self.max_side_gross:
+            self.n_capped += 1
+            self.log(f"SKIP {sym}: per-side GROSS cap "
+                     f"(${side_gross:.0f}+${notional:.0f} > ${self.max_side_gross:.0f} "
+                     f"{'LONG' if side_dir > 0 else 'SHORT'})")
+            return
         if gross + notional > self.max_gross:
             self.n_capped += 1
             self.log(f"SKIP {sym}: gross cap (${gross:.0f} + ${notional:.0f} > ${self.max_gross:.0f})")
@@ -1382,7 +1401,8 @@ class LiveBot(Bot):
         self.log(f"=== live bot [15m-ats] {mode} | notional=${self.notional} {szs} "
                  f"lev={self.leverage}x isolated | {xs} entry_window={ENTRY_WINDOW_S}s "
                  f"exit_grace={EXIT_GRACE_S}s | caps: {self.max_positions}pos "
-                 f"{self.max_per_side}/side ${self.max_gross:.0f}gross "
+                 f"{self.max_per_side}/side ${self.max_side_gross:.0f}/side-gross "
+                 f"${self.max_gross:.0f}gross "
                  f"${self.daily_loss_limit:.0f}daily-loss ===")
         self.notify(f"\U0001F916 <b>{mode}</b> 15m-ats starting\n"
                     f"resuming: cum=${self.cum_pnl:+.2f} open={len(self.positions)} "
@@ -1459,6 +1479,11 @@ if __name__ == "__main__":
                          f"(default {paper_bot.RV_PCTILE:g}). Lowering it adds lower-"
                          "volatility signals; see analysis/rv_gate.py, which prices the "
                          "40-60 band at +34.7bps net on 854 events.")
+    ap.add_argument("--max-side-gross", type=float, default=300.0,
+                    help="cap on GROSS notional open in one direction (default 300). The "
+                         "count cap is a poor proxy once sizing spans $12-$96; on "
+                         "2026-08-19 twenty shorts totalled $887 against $383 of "
+                         "collateral and cost $42 in a day. See analysis/side_cap.py")
     ap.add_argument("--pierce-size", action="store_true",
                     help="multiply the notional by a pierce-depth tilt (percentile rank "
                          "of how far the breakout closed beyond the prior 24h range). "
@@ -1478,7 +1503,7 @@ if __name__ == "__main__":
     bot = LiveBot(a.datadir, live=a.live, notional=a.notional, max_gross=a.max_gross,
             max_positions=a.max_positions, daily_loss_limit=a.daily_loss_limit,
             leverage=a.leverage, size_by_ats=not a.flat_size, tape_dir=a.tape_dir,
-            max_per_side=a.max_per_side)
+            max_per_side=a.max_per_side, max_side_gross=a.max_side_gross)
     bot.size_by_pierce = a.pierce_size
     if a.rv_pctile is not None:
         if not 0.0 <= a.rv_pctile <= 1.0:

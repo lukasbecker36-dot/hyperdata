@@ -137,6 +137,45 @@ EnvironmentFile=/etc/hyperdata/live.env
 # dates did (n=4,833, t=+2.36). pierce and pierce_pct are logged on every trade whether or
 # not sizing is on, so this stays measurable either way.
 #
+# --max-side-gross 300 added 2026-08-20, after a $43 drawdown in five days.
+#
+# What happened: on 08-19 two consecutive 15m bars opened 5 then 7 SHORT positions -- 12
+# shorts in 30 minutes, $557 of gross. The book peaked at 21 positions of which 20 were
+# SHORT, $887 of one-directional gross against $383 of collateral. A market-wide rally ran
+# every one of them over: -$42.42 on the day, 56% backstop rate, cum from +$5.68 to -$38.
+#
+# All three existing caps failed, each differently. --max-per-side 20 bound at EXACTLY 20
+# shorts, so it worked as specified and the specification was wrong. --max-gross 2000 never
+# came close to $887. The daily loss limit crossed its threshold late in the day, by which
+# point 17 positions were already open -- it blocks new ENTRIES and cannot close existing
+# ones, so it fired hours after the exposure was taken. That limitation is structural and
+# is NOT fixed here; force-closing a book mid-move is its own risk.
+#
+# Why a GROSS cap rather than a tighter count: ats x pierce sizing spans $12-$96, so eight
+# positions can be $96 or $768. A count is no longer a proxy for exposure. In the burst the
+# worst entries were at or near the $96 cap -- kPEPE $96.00, STX $96.00, INJ $95.58 --
+# because a violent move produces the deepest pierce and the highest ats, so the sizing
+# rules put MAXIMUM size on exactly the trades that were most correlated. That is a real
+# tension between the sizing work and correlated risk; the gross cap is what bounds it.
+#
+# $300 comes from exposure arithmetic, deliberately not from fitting the event: a 5%
+# adverse market move on $300 costs $15. A correlated burst then costs about what the daily
+# brake tolerates instead of three times it. It is tied to the $383 of collateral and
+# should be revisited if that moves.
+#
+# Replaying the actual 556-trade live book: the current 20-count gives -$40.53 total,
+# -$60.18 maxDD, -$42.42 on 08-19 and a peak of $887/side. With $300/side it is -$8.14,
+# -$28.70, -$18.14 and $299. Tighter settings ($250, $200) score slightly better or worse
+# without pattern, which is noise -- hence the principled anchor rather than the best cell.
+#
+# NOTE the backtest disagrees and was not followed. On the 49-day event set ret/|maxDD| is
+# BEST at the current cap of 20 (11.26, falling monotonically as it tightens), because
+# cluster_entries.py is right that clustered entries earn more PER TRADE. That measurement
+# is correct and answers the wrong question: 20 simultaneous shorts are not 20 independent
+# draws from that mean, they are one bet on the market reverting sized 20 times. The
+# backtest's worst day at any cap is -$24.04; live just did -$42.42, so the sample used to
+# justify the cap does not contain the tail the cap exists to bound.
+#
 # --daily-loss-limit RAISED 15 -> 25: at 15 it was binding too often after the position-cap
 # and rv-gate changes (it hit -$11.30 of -$15 on 2026-08-08 and would halt days that should
 # have kept trading). A -$25 24h swing is ~2nd-percentile, i.e. within normal variance for this
@@ -149,6 +188,7 @@ ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --max-gross 2000 \
     --max-positions 40 \
     --max-per-side 20 \
+    --max-side-gross 300 \
     --daily-loss-limit 25 \
     --ab-rest-pct 0.5 \
     --rv-pctile 0.40 \
