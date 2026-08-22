@@ -176,6 +176,25 @@ EnvironmentFile=/etc/hyperdata/live.env
 # backtest's worst day at any cap is -$24.04; live just did -$42.42, so the sample used to
 # justify the cap does not contain the tail the cap exists to bound.
 #
+# --halt-loss 100 is a STICKY drawdown brake, added 2026-08-22 at the user's request.
+#
+# Once realised cum P&L reaches -$100 the bot writes a HALT file and stops opening new
+# positions. It does NOT resume on its own: recovering above -$100 leaves it halted, and
+# only /resume (or deleting the file) re-enables entries. An automatic reset would put the
+# book straight back into whatever caused the loss, which is exactly the wrong reflex.
+#
+# HALT is deliberately not KILL. KILL flattens the book at market. HALT blocks ENTRIES only
+# and every open position still runs its normal reclaim/backstop exit, because force-closing
+# mid-move realises the whole correlated loss at the worst possible moment -- which is what
+# the 08-19 burst would have done.
+#
+# The file lives in the datadir so the halt survives a restart. A brake held only in memory
+# would clear itself on the next bounce, and this arm has been restarted a dozen times in a
+# fortnight. It is checked after every close rather than once per cycle, so it fires on the
+# trade that crosses the line rather than up to 15 minutes later.
+#
+# cum_pnl now includes funding, so the floor is on TOTAL realised return, not price P&L.
+#
 # --daily-loss-limit RAISED 15 -> 25: at 15 it was binding too often after the position-cap
 # and rv-gate changes (it hit -$11.30 of -$15 on 2026-08-08 and would halt days that should
 # have kept trading). A -$25 24h swing is ~2nd-percentile, i.e. within normal variance for this
@@ -190,6 +209,7 @@ ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --max-per-side 20 \
     --max-side-gross 300 \
     --daily-loss-limit 25 \
+    --halt-loss 100 \
     --ab-rest-pct 0.5 \
     --rv-pctile 0.40 \
     --pierce-size

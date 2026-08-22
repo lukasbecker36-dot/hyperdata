@@ -154,6 +154,54 @@ def _last_trades(datadir, interval, n=5):
         return []
 
 
+def _halt_paths():
+    """(label, datadir) for every configured arm. HALT lives beside the state file."""
+    return [(lab or iv, d) for iv, d, lab in _datadirs() if d]
+
+
+def cmd_halt():
+    """Manually block new entries on every arm. Exits are unaffected."""
+    out = []
+    for lab, d in _halt_paths():
+        f = os.path.join(d, "HALT")
+        if os.path.exists(f):
+            out.append(f"<b>[{lab}]</b> already halted")
+            continue
+        try:
+            with open(f, "w") as fh:
+                json.dump({"tripped_at": time.strftime("%Y-%m-%d %H:%M:%S",
+                                                       time.gmtime()),
+                           "reason": "manual /halt"}, fh, indent=1)
+            out.append(f"<b>[{lab}]</b> HALTED - no new entries")
+        except Exception as e:
+            out.append(f"<b>[{lab}]</b> could not halt: {e}")
+    out.append("<i>open positions still exit normally; use the KILL file to flatten</i>")
+    return "\n".join(out)
+
+
+def cmd_resume():
+    """Clear the halt so entries resume. This is the only way back in after the
+    drawdown brake trips -- deliberately manual, because an automatic reset would
+    re-enter straight into whatever caused the loss."""
+    out = []
+    for lab, d in _halt_paths():
+        f = os.path.join(d, "HALT")
+        if not os.path.exists(f):
+            out.append(f"<b>[{lab}]</b> not halted")
+            continue
+        try:
+            info = json.load(open(f))
+            why = f" (was: {info.get('reason','?')})"
+        except Exception:
+            why = ""
+        try:
+            os.remove(f)
+            out.append(f"<b>[{lab}]</b> RESUMED - entries re-enabled{why}")
+        except Exception as e:
+            out.append(f"<b>[{lab}]</b> could not resume: {e}")
+    return "\n".join(out)
+
+
 def cmd_status():
     lines = []
     mids = _mids()
@@ -166,6 +214,7 @@ def cmd_status():
         win = s.get("n_win", 0)
         wr = (win / closed * 100) if closed else 0.0
         cum = s.get("cum_pnl", 0.0)
+        halted = os.path.exists(os.path.join(d, "HALT"))
         pos = s.get("positions", {})
         age = _stale_min(d, interval)
         stale = age is not None and age > STALE_MIN
@@ -178,7 +227,7 @@ def cmd_status():
         if u is not None and pos:
             tail += (f", unreal ${u:+.2f}" + (f" + fund ${fu:+.2f}" if fu else "")
                      + f" -> net ${cum+u+fu:+.2f}")
-        lines.append(f"<b>[{label}]</b> cum ${cum:+.2f} | "
+        lines.append(("⛔ " if halted else "") + f"<b>[{label}]</b> cum ${cum:+.2f} | "
                      f"{closed} closed, {wr:.0f}% win{tail}")
     return "\n".join(lines) or "no bots configured"
 
@@ -366,6 +415,8 @@ HANDLERS = {
     "/pos": cmd_positions,
     "/trades": cmd_trades,
     "/adopt": cmd_adopt,
+    "/halt": cmd_halt,
+    "/resume": cmd_resume,
     "/update": cmd_update,
     "/help": lambda: HELP,
     "/start": lambda: HELP,

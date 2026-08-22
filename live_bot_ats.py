@@ -134,6 +134,9 @@ CROSS_CAP_BPS  = 10.0
 # across three liquidations only ~$6 is the liquidation premium; the rest is the strategy's
 # own left tail, which no leverage setting prevents.
 LIQ_SIGMA      = 6.0
+HALT_EMOJI     = "\U0001F6D1"   # stop sign, used in the HALT notification
+WARN_EMOJI     = "\U000026A0"
+BRK            = "\n"           # newline inside Telegram HTML messages
 # --- flow-toxicity shadow logging (analysis/toxicity.py) ---
 # Recorded at signal time, NEVER acted on. The tape study found that dropping the most
 # toxic 20% of fills moved a broad spike population from -259 to +7518 total net bps,
@@ -179,7 +182,8 @@ def round_sz(sz, sz_dec):
 class LiveBot(Bot):
     def __init__(self, datadir, live=False, notional=None, max_gross=1000.0,
                  max_positions=10, daily_loss_limit=50.0, leverage=3, size_by_ats=True,
-                 tape_dir=None, max_per_side=20, max_side_gross=300.0):
+                 tape_dir=None, max_per_side=20, max_side_gross=300.0,
+                 halt_loss=100.0):
         # 15m, HIGH+MID, breakout trigger. size_by_ats is the A/B knob: the tape says
         # whale-sizing is the worst of {inverse, flat, ats}, but on only 5 days and with
         # nothing significant, so run flat as a second live arm and let real fills decide.
@@ -209,6 +213,12 @@ class LiveBot(Bot):
         self.n_capped = 0        # signals refused by the position/gross caps, per cycle
         self.day = datetime.now(timezone.utc).date()
         self.kill_file = os.path.join(datadir, "KILL")
+        # HALT is deliberately NOT KILL. KILL flattens the book at market; HALT blocks new
+        # ENTRIES while leaving every open position to exit on its own reclaim/backstop
+        # rule. A drawdown brake that force-closed mid-move would realise the whole
+        # correlated loss at the worst moment, which is the opposite of protection.
+        self.halt_file = os.path.join(datadir, "HALT")
+        self.halt_loss = halt_loss
         self.tape_dir = tape_dir or TAPE_DIR
         self.flow = {}           # coin -> {minute: [buy_ntl, sell_ntl]}, shadow only
 
@@ -515,6 +525,7 @@ class LiveBot(Bot):
                 *self._tail(p)])
         fs = "" if fund is None else f" funding ${fund:+.3f}"
         self.notify(f"{reason.upper()} <b>{sym}</b>\n booked ${net_usd:+.2f} (fee ${fee:.3f}){fs} hold={hold_h:.1f}h\n total ${net_usd + (fund or 0.0):+.2f}  cum=${self.cum_pnl:+.2f}")
+        self.check_halt_loss()
         self._save_state()
         return net_usd
 
@@ -830,6 +841,9 @@ class LiveBot(Bot):
             self.n_capped += 1
             self.log(f"SKIP {sym}: gross cap (${gross:.0f} + ${notional:.0f} > ${self.max_gross:.0f})")
             return
+        if self.is_halted():
+            self.n_capped += 1
+            return                       # halted: no new entries. Exits are unaffected.
         if self.day_pnl <= -abs(self.daily_loss_limit):
             self.log(f"SKIP {sym}: daily loss limit hit (${self.day_pnl:+.2f})")
             return
@@ -1090,6 +1104,7 @@ class LiveBot(Bot):
         fstr = "" if fund is None else f"  funding=${fund:+.3f}"
         tot = pnl + (fund or 0.0)
         emoji = "\U0001F534" if pnl <= 0 else "\U0001F535"      # red loss / blue win
+        self.check_halt_loss()
         self.notify(f"{emoji} CLOSE <b>{sym}</b> ({reason})\n"
                     f"net={net*1e4:+.1f}bps  pnl=${pnl:+.3f}  fee=${fee_usd:.3f}{fstr}  hold={hold_h:.1f}h\n"
                     f"total=${tot:+.3f}  cum=${self.cum_pnl:+.2f}  "
@@ -1137,6 +1152,40 @@ class LiveBot(Bot):
                     self._work_exit(sym)
             except Exception as e:
                 self.log(f"WARN exit {sym}: {e}")
+
+    def is_halted(self):
+        """True if new entries are blocked. Backed by a FILE, not memory, so the halt
+        survives a restart -- a brake that resets when the process bounces is not a brake."""
+        return os.path.exists(self.halt_file)
+
+    def trip_halt(self, reason):
+        """Block new entries and say so. Idempotent: re-tripping does not re-notify."""
+        if self.is_halted():
+            return
+        try:
+            with open(self.halt_file, "w") as f:
+                json.dump({"tripped_at": iso(now_ms()), "reason": reason,
+                           "cum_pnl": round(self.cum_pnl, 4),
+                           "n_closed": self.n_closed}, f, indent=1)
+        except Exception as e:
+            self.log(f"WARN could not write HALT file: {e}")
+        self.log(f"HALT TRIPPED - {reason}. New entries blocked; open positions will "
+                 f"still exit normally. Clear with /resume or by deleting {self.halt_file}")
+        self.notify(HALT_EMOJI + " <b>HALTED</b> - " + reason + BRK
+                    + f"cum ${self.cum_pnl:+.2f} after {self.n_closed} trades" + BRK
+                    + "New entries blocked. Open positions still exit normally." + BRK
+                    + "Send /resume to restart entries.")
+
+    def check_halt_loss(self):
+        """Trip the brake if realised P&L has fallen to the configured floor.
+
+        Checked against cum_pnl, which carries funding as well as price P&L, so this is
+        total realised return. Called after every close rather than once per cycle, so it
+        fires on the trade that crosses the line instead of up to 15 minutes later.
+        """
+        if self.halt_loss and self.cum_pnl <= -abs(self.halt_loss):
+            self.trip_halt(f"realised P&L hit ${self.cum_pnl:+.2f} "
+                           f"(floor -${abs(self.halt_loss):.0f})")
 
     def check_kill(self):
         if not os.path.exists(self.kill_file):
@@ -1403,10 +1452,21 @@ class LiveBot(Bot):
                  f"exit_grace={EXIT_GRACE_S}s | caps: {self.max_positions}pos "
                  f"{self.max_per_side}/side ${self.max_side_gross:.0f}/side-gross "
                  f"${self.max_gross:.0f}gross "
-                 f"${self.daily_loss_limit:.0f}daily-loss ===")
+                 f"${self.daily_loss_limit:.0f}daily-loss "
+                 f"{('halt@-$%.0f' % abs(self.halt_loss)) if self.halt_loss else 'halt=off'}"
+                 f"{' [HALTED]' if self.is_halted() else ''} ===")
         self.notify(f"\U0001F916 <b>{mode}</b> 15m-ats starting\n"
                     f"resuming: cum=${self.cum_pnl:+.2f} open={len(self.positions)} "
                     f"closed={self.n_closed}")
+        if self.is_halted():
+            try:
+                _h = json.load(open(self.halt_file))
+                why = f"{_h.get('reason','?')} at {_h.get('tripped_at','?')}"
+            except Exception:
+                why = "HALT file present"
+            self.log(f"HALTED at startup - {why}. Managing open positions only.")
+            self.notify(WARN_EMOJI + " <b>starting HALTED</b> - " + why + BRK
+                        + "Open positions will be managed and exited; no new entries.")
         self.load_universe()
         self.reconcile()
         self.calibrate()
@@ -1479,6 +1539,11 @@ if __name__ == "__main__":
                          f"(default {paper_bot.RV_PCTILE:g}). Lowering it adds lower-"
                          "volatility signals; see analysis/rv_gate.py, which prices the "
                          "40-60 band at +34.7bps net on 854 events.")
+    ap.add_argument("--halt-loss", type=float, default=100.0,
+                    help="halt NEW ENTRIES once realised cum P&L falls to -X (default "
+                         "100; 0 disables). Sticky: writes a HALT file that survives "
+                         "restarts and must be cleared with /resume. Open positions are "
+                         "never force-closed -- that is what the KILL file does.")
     ap.add_argument("--max-side-gross", type=float, default=300.0,
                     help="cap on GROSS notional open in one direction (default 300). The "
                          "count cap is a poor proxy once sizing spans $12-$96; on "
@@ -1503,7 +1568,8 @@ if __name__ == "__main__":
     bot = LiveBot(a.datadir, live=a.live, notional=a.notional, max_gross=a.max_gross,
             max_positions=a.max_positions, daily_loss_limit=a.daily_loss_limit,
             leverage=a.leverage, size_by_ats=not a.flat_size, tape_dir=a.tape_dir,
-            max_per_side=a.max_per_side, max_side_gross=a.max_side_gross)
+            max_per_side=a.max_per_side, max_side_gross=a.max_side_gross,
+            halt_loss=a.halt_loss)
     bot.size_by_pierce = a.pierce_size
     if a.rv_pctile is not None:
         if not 0.0 <= a.rv_pctile <= 1.0:
