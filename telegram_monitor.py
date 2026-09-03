@@ -15,8 +15,13 @@ Commands:
   /trades      last few closed trades per timeframe
   /adopt       tell the live arm to adopt any exchange position it is not managing
                (e.g. a maker entry that filled after the fill-detector timed out)
+  /halt        block new entries on every arm; open positions still exit normally
+  /resume      clear the halt and re-enable entries (the only way back in after
+               the drawdown brake trips -- deliberately manual)
   /update      git pull + restart the bots (needs the sudoers rule, see DEPLOY §5)
   /help        this list
+
+Aliases: /pnl = /status, /pos = /positions, /start = /help.
 
 Config (env) additions:
   ADOPT_DATADIRS   optional "label:dir,..." override for which arms /adopt targets;
@@ -402,8 +407,10 @@ HELP = (
     "<b>Hyperliquid paper bot monitor</b>\n"
     "/status — P&amp;L + win rate + open count\n"
     "/pnl — same as /status\n"
-    "/positions — currently open positions\n"
+    "/positions — currently open positions (alias /pos)\n"
     "/trades — last few closed trades\n"
+    "/halt — block new entries; open positions still exit normally\n"
+    "/resume — clear the halt, re-enable entries\n"
     "/adopt — adopt unmanaged exchange positions (live arm)\n"
     "/update — git pull + restart the bots\n"
     "/help — this message")
@@ -422,11 +429,16 @@ HANDLERS = {
     "/start": lambda: HELP,
 }
 
-# command menu (autocomplete popup); order shown in the client
+# command menu (autocomplete popup); order shown in the client. Aliases (/pnl, /pos)
+# and Telegram's own /start are deliberately absent: the popup lists each action once.
+# Keep in sync with HANDLERS and HELP -- halt/resume shipped working but unlisted, so
+# they were unreachable by anyone who did not already know they existed.
 MENU = [
     ("status", "P&L, win rate, open count"),
     ("positions", "currently open positions"),
     ("trades", "last few closed trades"),
+    ("halt", "block new entries (open positions still exit)"),
+    ("resume", "re-enable entries after a halt"),
     ("adopt", "adopt unmanaged exchange positions"),
     ("update", "git pull + restart the bots"),
     ("help", "list commands"),
