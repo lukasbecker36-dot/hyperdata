@@ -59,6 +59,37 @@ EnvironmentFile=/etc/hyperdata/live.env
 # reintroduce the confound it was built to remove. The 0.5x floor gives $12.00, clear of
 # the $10 MIN_NOTIONAL; the 3.0x cap gives $72.00.
 #
+# SCALED 24 -> 44 on 2026-09-04, after the account was topped up from $343 to $713.
+# The $24 was calibrated on 2026-08-09 (5e679a5) against ~$387 of collateral, so
+# 713/387 = 1.84x and 44 holds risk PER TRADE at the fraction ~900 live trades have
+# already validated. This is a capital rescale, not a change of view.
+#
+# Sized off MEASURED fills, not the 1.483x mean multiplier: 32 live opens since the
+# 09-03 restart ran mean $29.9, median $26, p90 $56, max $78. The measured mean sits
+# above 1.483 x 24 because --pierce-size multiplies on top of ats. So mean notional
+# goes $29.9 -> ~$55. The 0.5x floor gives $22.00, still clear of MIN_NOTIONAL.
+#
+# MULT_MAX 4.0 permits a $176 single bet at this base, up from $96. paper_bot.py used to
+# justify that cap in DOLLARS, so raising the base invalidated its stated reasoning; the
+# arithmetic was redone rather than assumed (analysis/mult_margin.py, 917 live trades).
+#
+# The quantity that binds is not the notional but the MARGIN of one isolated position,
+# MULT_MAX x notional / leverage, because _lev_for can floor leverage at 1x and an
+# isolated liquidation loses the whole margin. That peak is REAL, not a tail bound:
+# 2.5% of trades hit 4.0x, 9.4% ran at 1x, and 3 were both, so the worst observed
+# single-position margin equals the theoretical maximum exactly.
+#
+# It needs no new cap, because it is the SAME RISK as before in the only terms that
+# matter -- worst single-position margin as a fraction of collateral:
+#     base $24 / $387 collateral -> $96  = 24.8%
+#     base $44 / $713 collateral -> $176 = 24.7%
+# Scaling the notional by exactly the collateral ratio held that constant, and the
+# other two relations came along unchanged: one worst-case position is 3.8x the daily
+# brake ($96/$25, $176/$46) and ~95% of the sticky halt ($96/$100, $176/$185).
+#
+# The invariant to hold on any future resize is MULT_MAX x notional / collateral ~= 25%.
+# Raising the notional WITHOUT the collateral is what would break it.
+#
 # --ab-rest-pct 0.5 runs a RANDOMISED experiment: half of all tight-spread signals are
 # forced to rest instead of crossing. Wide-spread signals are untouched.
 #
@@ -160,8 +191,14 @@ EnvironmentFile=/etc/hyperdata/live.env
 #
 # $300 comes from exposure arithmetic, deliberately not from fitting the event: a 5%
 # adverse market move on $300 costs $15. A correlated burst then costs about what the daily
-# brake tolerates instead of three times it. It is tied to the $383 of collateral and
-# should be revisited if that moves.
+# brake tolerates instead of three times it. It was tied to the $383 of collateral.
+#
+# RAISED 300 -> 550 on 2026-09-04, with the collateral ($343 -> $713) and the notional
+# (24 -> 44). The arithmetic is preserved rather than abandoned: 5% of $550 is $27.50
+# against a daily brake of $46 -- the same 'one correlated burst costs about one bad
+# day' relation the $300 was chosen to give. Left at $300 it would bind at ~5 positions
+# per side instead of ~10, firing during exactly the clustered entries that carry the
+# edge (+56.5bps clustered vs -19bps isolated).
 #
 # Replaying the actual 556-trade live book: the current 20-count gives -$40.53 total,
 # -$60.18 maxDD, -$42.42 on 08-19 and a peak of $887/side. With $300/side it is -$8.14,
@@ -176,10 +213,13 @@ EnvironmentFile=/etc/hyperdata/live.env
 # backtest's worst day at any cap is -$24.04; live just did -$42.42, so the sample used to
 # justify the cap does not contain the tail the cap exists to bound.
 #
-# --halt-loss 100 is a STICKY drawdown brake, added 2026-08-22 at the user's request.
+# --halt-loss 185 is a STICKY drawdown brake, added 2026-08-22 at the user's request as
+# -$100 and scaled to -$185 on 2026-09-04 so it stays the same ~26% of collateral after
+# the top-up ($387 -> $713). Holding it at $100 would have silently tightened it to 14%,
+# which is a different policy, not the same one.
 #
-# Once realised cum P&L reaches -$100 the bot writes a HALT file and stops opening new
-# positions. It does NOT resume on its own: recovering above -$100 leaves it halted, and
+# Once realised cum P&L reaches -$185 the bot writes a HALT file and stops opening new
+# positions. It does NOT resume on its own: recovering above -$185 leaves it halted, and
 # only /resume (or deleting the file) re-enables entries. An automatic reset would put the
 # book straight back into whatever caused the loss, which is exactly the wrong reflex.
 #
@@ -200,16 +240,21 @@ EnvironmentFile=/etc/hyperdata/live.env
 # have kept trading). A -$25 24h swing is ~2nd-percentile, i.e. within normal variance for this
 # strategy, so 25 lets it trade through an ordinary down-day without a mid-day halt distorting
 # the result. Still a real circuit breaker for a genuinely abnormal day.
+#
+# RAISED AGAIN 25 -> 46 on 2026-09-04, x1.84 with the notional. At $44 bets a $25 cap
+# would be TIGHTER in risk terms than the $15 already rejected for binding too often,
+# turning the backstop into the binding constraint. 46 preserves the ~2nd percentile
+# day it was chosen to represent.
 ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/live_bot_ats.py \
     --datadir /opt/hyperdata/live_15m_ats \
     --live \
-    --notional 24 \
+    --notional 44 \
     --max-gross 2000 \
     --max-positions 40 \
     --max-per-side 20 \
-    --max-side-gross 300 \
-    --daily-loss-limit 25 \
-    --halt-loss 100 \
+    --max-side-gross 550 \
+    --daily-loss-limit 46 \
+    --halt-loss 185 \
     --ab-rest-pct 0.5 \
     --rv-pctile 0.40 \
     --pierce-size

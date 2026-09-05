@@ -53,9 +53,21 @@ SIZE_MIN      = 0.5          # notional multiplier floor
 SIZE_MAX      = 3.0          # notional multiplier cap
 PIERCE_REF    = 0.5          # pierce percentile that maps to a 1.0x tilt (the median)
 PIERCE_MAX    = 2.0          # cap on the pierce leg alone
-MULT_MAX      = 4.0          # cap on ats x pierce. Unclipped the product spans 0.25-6.0x;
-                             # 0.5 x $24 = $12 clears MIN_NOTIONAL and 4.0 x $24 = $96 is
-                             # the largest single bet the liquidation sizing still covers
+MULT_MAX      = 4.0          # cap on ats x pierce. Unclipped the product spans 0.25-6.0x.
+                             # Stated as a MULTIPLIER, not in dollars: the binding
+                             # quantity is the worst-case margin of ONE isolated
+                             # position, MULT_MAX x notional / leverage. _lev_for can
+                             # floor leverage at 1x, so the worst case is the whole
+                             # MULT_MAX x notional sitting as margin in a single
+                             # position -- all of which an isolated liquidation loses.
+                             # Not a tail bound: replaying 917 live trades
+                             # (analysis/mult_margin.py) 2.5% hit 4.0x, 9.4% run at 1x
+                             # and 3 were BOTH, so the observed worst equals the
+                             # theoretical worst. The invariant to hold when resizing:
+                             #     MULT_MAX x notional / collateral  ~=  25%
+                             # (24.8% at $24/$387, 24.7% at $44/$713). SIZE_MIN x
+                             # notional must also clear MIN_NOTIONAL. Raising the
+                             # notional WITHOUT the collateral is what breaks this.
 # fallback rv thresholds if calibration fails (computed 2026-07 from historical data)
 RV_FALLBACK   = {"5m": 0.00256, "15m": 0.00514}
 
