@@ -403,6 +403,102 @@ def cmd_adopt():
             "and reports back here (or confirms it is flat).")
 
 
+# ---- pre-unlock shorts (unlock_bot.py) ------------------------------------------------
+# Same split as /adopt: the monitor owns the Telegram long-poll but never holds the MEXC
+# key, so a button tap or /unlock_* command becomes a request file the unlock bot consumes.
+UNLOCK_DIR = os.environ.get("UNLOCK_DATADIR", "/opt/hyperdata/unlocks")
+UNLOCK_MIN_SIZE = float(os.environ.get("UNLOCK_MIN_SIZE", "0.05"))
+
+
+def _unlock_request(action, key=None, sym=None):
+    d = os.path.join(UNLOCK_DIR, "requests")
+    try:
+        os.makedirs(d, exist_ok=True)
+        name = f"{int(time.time() * 1000)}_{action}.json"
+        with open(os.path.join(d, name), "w") as f:
+            json.dump({"action": action, "key": key, "sym": sym, "ts": int(time.time())}, f)
+        return True
+    except Exception:
+        return False
+
+
+def _unlock_json(name):
+    try:
+        with open(os.path.join(UNLOCK_DIR, name)) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def cmd_unlocks():
+    """Open unlock trades, then the upcoming >= UNLOCK_MIN_SIZE cliffs on MEXC perps."""
+    st = _unlock_json("state.json") or {}
+    cand = _unlock_json("candidates.json") or {}
+    lines = ["<b>Unlock shorts</b>"]
+    live = [t for t in (st.get("trades") or {}).values()
+            if t.get("status") in ("open", "opening", "closing", "check")]
+    for t in live:
+        a = t.get("alt") or {}
+        px, entry = t.get("last_px"), a.get("px")
+        mv = f" · {px / entry - 1:+.1%} vs entry" if px and entry else ""
+        lines.append(f"• <b>{t['sym']}</b> {t['status']}{' PAPER' if t.get('paper') else ''} · "
+                     f"unlock {t['unlock']}{mv} · closes "
+                     f"{datetime.fromtimestamp(t['close_at'], timezone.utc):%m-%d %H:%M} UTC")
+    if not live:
+        lines.append("no open trades")
+    rows = [r for r in cand.get("rows", []) if r.get("tradeable") and r["size"] >= UNLOCK_MIN_SIZE
+            and r["unlock_ts"] > time.time()]
+    lines.append(f"\n<b>Upcoming ≥{UNLOCK_MIN_SIZE:.0%}</b> (enter ~5d before)")
+    for r in rows[:12]:
+        days = (r["unlock_ts"] - time.time()) / 86400
+        lines.append(f"• {r['unlock']} <b>{r['sym']}</b> {r['size']:.1%} · in {days:.1f}d · "
+                     f"{r['big_cliffs_past_yr']} cliffs/yr")
+    if not rows:
+        lines.append("none in the next 30 days")
+    if cand.get("refreshed"):
+        lines.append(f"<i>schedules refreshed {datetime.fromtimestamp(cand['refreshed'], timezone.utc):%m-%d %H:%M} UTC</i>")
+    lines.append("/unlock_go SYM · /unlock_skip SYM · /unlock_close SYM")
+    return "\n".join(lines)
+
+
+def _unlock_cmd(action, args):
+    if not args:
+        return f"usage: /unlock_{action} SYMBOL"
+    sym = args[0].upper()
+    if not _unlock_request(action, sym=sym):
+        return f"could not write the request to {UNLOCK_DIR}"
+    return {"go": f"⏳ {sym}: short requested — the unlock bot confirms here",
+            "skip": f"{sym}: skip requested",
+            "close": f"⏳ {sym}: close requested"}[action]
+
+
+ARG_HANDLERS = {
+    "/unlock_go": lambda args: _unlock_cmd("go", args),
+    "/unlock_skip": lambda args: _unlock_cmd("skip", args),
+    "/unlock_close": lambda args: _unlock_cmd("close", args),
+}
+
+
+def handle_callback(cq, allowed):
+    """Inline-button taps from unlock alerts: data is 'unl:<go|skip>:<SYM_YYYYMMDD>'."""
+    chat = ((cq.get("message") or {}).get("chat") or {})
+    if str(chat.get("id")) != allowed:
+        return
+    parts = (cq.get("data") or "").split(":")
+    if len(parts) != 3 or parts[0] != "unl" or parts[1] not in ("go", "skip"):
+        tg.answer_callback(cq.get("id"), "unknown button")
+        return
+    ok = _unlock_request(parts[1], key=parts[2])
+    tg.answer_callback(cq.get("id"), "queued" if ok else "failed")
+    sym = parts[2].split("_")[0]
+    if not ok:
+        tg.send(f"could not queue {parts[1]} for {sym} (check {UNLOCK_DIR})")
+    elif parts[1] == "go":
+        tg.send(f"⏳ {sym}: short requested — the unlock bot confirms here")
+    else:
+        tg.send(f"{sym}: skipped")
+
+
 HELP = (
     "<b>Hyperliquid paper bot monitor</b>\n"
     "/status — P&amp;L + win rate + open count\n"
@@ -413,6 +509,8 @@ HELP = (
     "/resume — clear the halt, re-enable entries\n"
     "/adopt — adopt unmanaged exchange positions (live arm)\n"
     "/update — git pull + restart the bots\n"
+    "/unlocks — pre-unlock shorts: open trades + upcoming unlocks\n"
+    "/unlock_go SYM · /unlock_skip SYM · /unlock_close SYM\n"
     "/help — this message")
 
 HANDLERS = {
@@ -425,6 +523,7 @@ HANDLERS = {
     "/halt": cmd_halt,
     "/resume": cmd_resume,
     "/update": cmd_update,
+    "/unlocks": cmd_unlocks,
     "/help": lambda: HELP,
     "/start": lambda: HELP,
 }
@@ -441,6 +540,8 @@ MENU = [
     ("resume", "re-enable entries after a halt"),
     ("adopt", "adopt unmanaged exchange positions"),
     ("update", "git pull + restart the bots"),
+    ("unlocks", "pre-unlock shorts: open trades + upcoming"),
+    ("unlock_close", "close an unlock trade: /unlock_close SYM"),
     ("help", "list commands"),
 ]
 
@@ -461,6 +562,12 @@ def main():
             continue
         for u in updates:
             offset = u["update_id"] + 1
+            if u.get("callback_query"):
+                try:
+                    handle_callback(u["callback_query"], allowed)
+                except Exception as e:
+                    tg.send(f"error: {e}")
+                continue
             msg = u.get("message") or u.get("edited_message") or {}
             chat = msg.get("chat", {})
             if str(chat.get("id")) != allowed:      # ignore everyone else
@@ -469,6 +576,9 @@ def main():
             cmd = text.split()[0] if text else ""
             cmd = cmd.split("@")[0]                  # strip @botname in groups
             handler = HANDLERS.get(cmd)
+            if cmd in ARG_HANDLERS:
+                arg_handler = ARG_HANDLERS[cmd]
+                handler = lambda: arg_handler(text.split()[1:])   # noqa: E731
             if handler:
                 try:
                     reply = handler()

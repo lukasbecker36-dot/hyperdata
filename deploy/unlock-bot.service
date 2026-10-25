@@ -1,0 +1,30 @@
+[Unit]
+Description=Pre-unlock short bot (MEXC futures, approve-by-Telegram) — REAL MONEY
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+EnvironmentFile=-/etc/hyperdata/telegram.env
+# MEXC_FUTURES_KEY + MEXC_FUTURES_SECRET (futures trading only, no withdrawal, IP-bound).
+# Must be root-owned, chmod 600. See deploy/UNLOCKS.md.
+EnvironmentFile=/etc/hyperdata/mexc_futures.env
+# Nothing trades without a tap: every alert waits for Short / Skip in Telegram.
+# --notional is per leg: $100 short + $100 BTC long, 1x isolated = $200 of margin a trade.
+# --max-open 6 bounds margin at $1,200; the study's busiest stretch had ~4 open at once
+# with a 5-day entry.
+ExecStart=/usr/bin/python3 /opt/hyperdata/unlock_bot.py \
+    --datadir /opt/hyperdata/unlocks \
+    --live \
+    --notional 100 \
+    --min-size 0.05 \
+    --max-open 6
+Restart=always
+RestartSec=30
+StandardOutput=append:/opt/hyperdata/unlocks/service.out
+StandardError=append:/opt/hyperdata/unlocks/service.err
+
+[Install]
+WantedBy=multi-user.target

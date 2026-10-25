@@ -38,19 +38,34 @@ def _call(method, params, tries=3, timeout=15):
     return {"ok": False, "error": str(last)}
 
 
-def send(text, chat_id=None):
-    """Send a message. Returns True on success, False otherwise. Never raises."""
+def send(text, chat_id=None, buttons=None):
+    """Send a message. Returns True on success, False otherwise. Never raises.
+
+    `buttons` is an optional inline keyboard: rows of (label, callback_data) tuples.
+    A tap arrives at the monitor's long-poll as a callback_query carrying that data."""
     if not TOKEN:
         return False
     cid = chat_id or CHAT_ID
     if not cid:
         return False
-    res = _call("sendMessage", {
+    params = {
         "chat_id": cid,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": "true",
-    })
+    }
+    if buttons:
+        params["reply_markup"] = json.dumps({"inline_keyboard": [
+            [{"text": lab, "callback_data": data} for lab, data in row] for row in buttons]})
+    res = _call("sendMessage", params)
+    return bool(res.get("ok"))
+
+
+def answer_callback(callback_id, text=""):
+    """Acknowledge a button tap (stops the client's spinner). Never raises."""
+    if not TOKEN:
+        return False
+    res = _call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
     return bool(res.get("ok"))
 
 
