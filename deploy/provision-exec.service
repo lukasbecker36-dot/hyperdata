@@ -1,0 +1,19 @@
+[Unit]
+Description=MEXC spot dip-provision LIVE executor (real orders)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+EnvironmentFile=-/etc/hyperdata/telegram.env
+EnvironmentFile=/etc/hyperdata/provision.env
+ExecStart=/usr/bin/python3 /opt/hyperdata/provision_exec.py --datadir /opt/hyperdata/live_provision --lot 2 --live
+Restart=always
+RestartSec=20
+StandardOutput=append:/opt/hyperdata/live_provision/service.out
+StandardError=append:/opt/hyperdata/live_provision/service.err
+
+[Install]
+WantedBy=multi-user.target

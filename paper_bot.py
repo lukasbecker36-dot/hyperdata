@@ -175,12 +175,16 @@ class Bot:
     def _winrate(self):
         return self.n_win / self.n_closed * 100 if self.n_closed else 0.0
 
+    # Off at the user's request (2026-10-26): /status gives the same numbers on demand.
+    # Applies to every arm, live included (LiveBot inherits this).
+    DAILY_SUMMARY = False
+
     def _maybe_daily_summary(self):
         """Once per UTC day, push a P&L snapshot (skips the first cycle after (re)start)."""
         today = datetime.now(timezone.utc).date()
         if self._last_summary_day == today:
             return
-        if self._last_summary_day is not None:
+        if self._last_summary_day is not None and self.DAILY_SUMMARY:
             self.notify(f"\U0001F4C8 daily summary\ncum P&amp;L: ${self.cum_pnl:+.2f}\n"
                         f"closed: {self.n_closed}  win: {self._winrate():.0f}%  liq: {self.n_liq}\n"
                         f"open: {len(self.positions)}")

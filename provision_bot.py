@@ -60,7 +60,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-import mexc_api as mx
+import mexc_api as mx        # default venue; --venue spot swaps this at startup
 
 try:
     import telegram_notify as tg          # optional; must never break trading
@@ -71,6 +71,23 @@ except Exception:                          # noqa: BLE001
 DIP           = 0.05      # resting bid this far below the prior hourly close
 TP            = 0.10      # resting sell this far above the fill price
 MAX_HOLD_H    = 72        # market exit after this long
+STOP_LOSS     = None      # hard stop below the fill; None disables it (current setting).
+                          #
+                          # provide6.py swept 219 tokens / 5,122 trades: every stop at
+                          # 30% or tighter is SIGNIFICANTLY worse than none (a 10% stop
+                          # takes +$34.70 -> +$3.90 per token) because it converts
+                          # recoverable dips into realised losses -- the target-hit rate
+                          # falls from 68% to 49%. A 40% stop looked free there
+                          # (-$5.30/token, CI spanning zero) and was run live from
+                          # 2026-07-31.
+                          #
+                          # Six days of live spot data overruled it. The stop fired on
+                          # 10.5% of fills against the backtest's 5.8% -- this crop of
+                          # coins swings far wider than the 18-month average -- and cost
+                          # $2,323, more than every other loss combined, against
+                          # $1,756 of realised P&L. Removed 2026-08-06. The 72h
+                          # backstop is the only exit on the losing side, which is what
+                          # the original sweep favoured.
 MAX_LOTS      = 5         # per symbol; caps cash at MAX_LOTS * LOT_USD
 LOT_USD       = 100.0
 FROM_DAY      = 3         # listing-age window
@@ -498,19 +515,31 @@ class Bot:
                     opened, skip, int(meta["api_allowed"])])
 
     def _manage_lots(self, closed_ts, candles):
-        """Resting-sell target on any bar after entry, else the 72h market exit."""
+        """
+        Resting-sell target on any bar after entry, a hard stop below it, else the
+        72h market exit.
+
+        Within a bar the STOP is evaluated before the target, so a bar touching both
+        is scored as the loss. Hourly bars cannot say which came first, and this is
+        the conservative reading.
+        """
         for lot in list(self.lots):
             rows = candles.get(lot["contract"]) or []
+            stop_px = lot["entry_px"] * (1 - STOP_LOSS) if STOP_LOSS else None
             hit = None
             for r in rows:
-                ts, _, high, _, close, _ = r
+                ts, _, high, low, close, _ = r
                 if ts <= lot["checked_ts"] or ts > closed_ts:
                     continue
+                if stop_px is not None and low <= stop_px:
+                    hit = (ts, stop_px, "stop")
+                    break
                 if high >= lot["target"]:
-                    hit = ts
+                    hit = (ts, lot["target"], "target")
                     break
             if hit is not None:
-                self.close_lot(lot, lot["target"], "target", (hit + BAR_SECS) * 1000)
+                ts, px, reason = hit
+                self.close_lot(lot, px, reason, (ts + BAR_SECS) * 1000)
                 self.lots.remove(lot)
                 continue
             lot["checked_ts"] = max(lot["checked_ts"], closed_ts)
@@ -634,10 +663,19 @@ if __name__ == "__main__":
     ap.add_argument("--api-only", action="store_true",
                     help="trade only apiAllowed symbols (the live-tradeable subset)")
     ap.add_argument("--once", action="store_true", help="run one cycle and exit")
+    ap.add_argument("--venue", choices=["futures", "spot"], default="futures",
+                    help="market data source. 'spot' re-measures the queue on the books "
+                         "that can actually be traded -- MEXC's futures order endpoints "
+                         "have been under maintenance since 2022, spot's are live.")
     ap.add_argument("--verbose", action="store_true",
                     help=f"push a Telegram message per fill and close. Off by default: "
                          f"~40-50/day, and per-trade P&L misleads early in a run. "
                          f"A digest goes out every {SUMMARY_EVERY_H}h regardless.")
     a = ap.parse_args()
+    if a.venue == "spot":
+        import mexc_spot_api
+        mx = mexc_spot_api                      # noqa: F811 - deliberate venue swap
+        globals()["mx"] = mexc_spot_api
+        globals()["BAR_SECS"] = mexc_spot_api.BAR_SECS
     Bot(a.datadir, label=a.label, api_only=a.api_only, lot_usd=a.lot,
         verbose=a.verbose).run(once=a.once)

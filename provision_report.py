@@ -34,8 +34,13 @@ from datetime import datetime, timezone
 
 DATADIR = sys.argv[1] if len(sys.argv) > 1 else "./paper_provision"
 BT_FILLS_PER_TOKEN_42D = 23.0
-BT_TP_RATE = 56.0
+BT_TP_RATE = 66.0        # share of FILLS exiting on the target (provide2.py, 5%/10%/72h).
+                         # Not to be confused with the 56% of TOKENS that were profitable
+                         # -- an earlier version of this file compared against the wrong one.
 BT_PNL_PER_TOKEN_42D = 31.0
+BT_LOSS_USD = -15.2      # implied average time-stop loss: $31/token over 23 fills at a
+                         # 66% hit rate requires losers near -$15. Live losses are running
+                         # at more than double that, which is the key fragility.
 
 
 def read(path):
