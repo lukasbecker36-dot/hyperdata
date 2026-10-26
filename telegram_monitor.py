@@ -414,7 +414,8 @@ def _unlock_request(action, key=None, sym=None):
     d = os.path.join(UNLOCK_DIR, "requests")
     try:
         os.makedirs(d, exist_ok=True)
-        name = f"{int(time.time() * 1000)}_{action}.json"
+        # unique per request: two taps in the same millisecond must not overwrite
+        name = f"{int(time.time() * 1000)}_{action}_{os.urandom(3).hex()}.json"
         with open(os.path.join(d, name), "w") as f:
             json.dump({"action": action, "key": key, "sym": sym, "ts": int(time.time())}, f)
         return True
@@ -438,14 +439,12 @@ def cmd_unlocks():
     live = [t for t in (st.get("trades") or {}).values()
             if t.get("status") in ("open", "opening", "closing", "check")]
     for t in live:
-        a = t.get("alt") or {}
-        px, entry = t.get("last_px"), a.get("px")
-        mv = f" · {px / entry - 1:+.1%} vs entry" if px and entry else ""
-        lines.append(f"• <b>{t['sym']}</b> {t['status']}{' PAPER' if t.get('paper') else ''} · "
-                     f"unlock {t['unlock']}{mv} · closes "
+        px, entry = t.get("last_px"), t.get("alt_px")
+        mv = f" · {px / entry - 1:+.1%} vs ref" if px and entry else ""
+        lines.append(f"• <b>{t['sym']}</b> short · unlock {t['unlock']}{mv} · close "
                      f"{datetime.fromtimestamp(t['close_at'], timezone.utc):%m-%d %H:%M} UTC")
     if not live:
-        lines.append("no open trades")
+        lines.append("no open shorts recorded")
     rows = [r for r in cand.get("rows", []) if r.get("tradeable") and r["size"] >= UNLOCK_MIN_SIZE
             and r["unlock_ts"] > time.time()]
     lines.append(f"\n<b>Upcoming ≥{UNLOCK_MIN_SIZE:.0%}</b> (enter ~5d before)")
@@ -467,9 +466,7 @@ def _unlock_cmd(action, args):
     sym = args[0].upper()
     if not _unlock_request(action, sym=sym):
         return f"could not write the request to {UNLOCK_DIR}"
-    return {"go": f"⏳ {sym}: short requested — the unlock bot confirms here",
-            "skip": f"{sym}: skip requested",
-            "close": f"⏳ {sym}: close requested"}[action]
+    return None          # the unlock bot confirms within ~10s
 
 
 ARG_HANDLERS = {
@@ -480,23 +477,21 @@ ARG_HANDLERS = {
 
 
 def handle_callback(cq, allowed):
-    """Inline-button taps from unlock alerts: data is 'unl:<go|skip>:<SYM_YYYYMMDD>'."""
+    """Inline-button taps from unlock messages: 'unl:go:<SYM_YYYYMMDD>' (I shorted it),
+    'unl:skip:<SYM_YYYYMMDD>', 'unl:close:<SYM>' (I closed it)."""
     chat = ((cq.get("message") or {}).get("chat") or {})
     if str(chat.get("id")) != allowed:
         return
     parts = (cq.get("data") or "").split(":")
-    if len(parts) != 3 or parts[0] != "unl" or parts[1] not in ("go", "skip"):
+    if len(parts) != 3 or parts[0] != "unl" or parts[1] not in ("go", "skip", "close"):
         tg.answer_callback(cq.get("id"), "unknown button")
         return
-    ok = _unlock_request(parts[1], key=parts[2])
-    tg.answer_callback(cq.get("id"), "queued" if ok else "failed")
-    sym = parts[2].split("_")[0]
+    act, arg = parts[1], parts[2]
+    ok = (_unlock_request(act, sym=arg) if act == "close" else _unlock_request(act, key=arg))
+    tg.answer_callback(cq.get("id"), {"go": "recorded", "skip": "skipped",
+                                      "close": "marked closed"}[act] if ok else "failed")
     if not ok:
-        tg.send(f"could not queue {parts[1]} for {sym} (check {UNLOCK_DIR})")
-    elif parts[1] == "go":
-        tg.send(f"⏳ {sym}: short requested — the unlock bot confirms here")
-    else:
-        tg.send(f"{sym}: skipped")
+        tg.send(f"could not queue {act} for {arg.split('_')[0]} (check {UNLOCK_DIR})")
 
 
 HELP = (
@@ -509,8 +504,9 @@ HELP = (
     "/resume — clear the halt, re-enable entries\n"
     "/adopt — adopt unmanaged exchange positions (live arm)\n"
     "/update — git pull + restart the bots\n"
-    "/unlocks — pre-unlock shorts: open trades + upcoming unlocks\n"
-    "/unlock_go SYM · /unlock_skip SYM · /unlock_close SYM\n"
+    "/unlocks — pre-unlock shorts: your open ones + upcoming unlocks\n"
+    "/unlock_go SYM — I've shorted SYM (starts close reminder + squeeze watch)\n"
+    "/unlock_close SYM — I've closed SYM · /unlock_skip SYM — not trading it\n"
     "/help — this message")
 
 HANDLERS = {
@@ -541,7 +537,7 @@ MENU = [
     ("adopt", "adopt unmanaged exchange positions"),
     ("update", "git pull + restart the bots"),
     ("unlocks", "pre-unlock shorts: open trades + upcoming"),
-    ("unlock_close", "close an unlock trade: /unlock_close SYM"),
+    ("unlock_close", "mark an unlock short closed: /unlock_close SYM"),
     ("help", "list commands"),
 ]
 

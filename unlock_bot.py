@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pre-unlock short bot -- MEXC futures, approve-by-Telegram.
+Pre-unlock short ALERTS -- you trade on MEXC futures by hand, the bot times it.
 
 STRATEGY (scratchpad unl_*.py study, 2026-10-25)
   Tokens bleed into a large cliff unlock and on the unlock day itself. Over 380 one-day
@@ -11,51 +11,48 @@ STRATEGY (scratchpad unl_*.py study, 2026-10-25)
   +$5), so expect the low end. Larger and rarer unlocks did better.
 
   ENTRY   ~5 days before the unlock: short the token, long the same notional of BTC,
-          both 1x isolated. Only after a human taps "Short" in Telegram -- the schedule
-          data is good but not perfect (delays, wrong ticker), so a person checks it.
+          both 1x isolated.
   EXIT    at the end of the unlock day (00:00 UTC on T+1, unlocks are mostly 00:00 on T).
           Holding longer adds little and the day after has recently bounced.
   RISK    the tail is a squeeze: about 1 trade in 100 doubled against the short. 1x
-          isolated caps that at the leg's own margin. There is no stop (none was tested);
-          the bot alerts at +25% and +50% adverse and /unlock_close closes on demand.
+          isolated caps that at the leg's own margin. No stop was tested; the bot warns
+          at +25% and +50% against the short.
+
+WHY ALERTS AND NOT ORDERS
+  MEXC's contract API has had order placement "under maintenance" since 2022 (the reason
+  provision_exec.py trades spot), so nothing here can trade futures. The bot does the part
+  that is easy to get wrong by hand -- spotting the unlock, the timing, the close -- and
+  you place the orders in the MEXC app. Use Post Only limits at the touch: fees are 0bp
+  maker, but these books are 10-75bp wide and crossing four times costs a real slice of a
+  ~3% edge.
 
 FLOW
-  every --refresh-hours   pull DefiLlama unlock schedules + MEXC contracts, build the
-                          candidate list (candidates.json), alert on any cliff >= --min-size
-                          now inside its entry window, with Short / Skip buttons
-  telegram_monitor.py     owns the Telegram long-poll (one consumer per bot token), so it
-                          turns a button tap or /unlock_* command into a request file in
-                          <datadir>/requests/. It never holds the MEXC key.
-  this process            consumes requests, works the orders, closes on schedule, and
-                          keeps state.json (read by /unlocks)
+  every --refresh-hours   pull DefiLlama schedules + MEXC contracts into candidates.json;
+                          alert on each cliff >= --min-size once it is inside its entry
+                          window, with "I shorted it" / "Skip" buttons
+  telegram_monitor.py     owns the Telegram long-poll (one consumer per bot token) and turns
+                          taps and /unlock_* commands into request files in <datadir>/requests/
+  this process            records the trades you report, warns on squeezes, reminds you to
+                          close at 00:00 UTC after the unlock day (again 6h later if you have
+                          not marked it closed), and keeps state.json for /unlocks
 
-EXECUTION -- maker first, taker fallback
-  Each leg rests a post-only order at the touch and re-pegs it every --repeg-sec while
-  the market moves, for up to --maker-minutes; whatever is still unfilled then crosses at
-  market. MEXC charges these contracts 0bp maker / 0-2bp taker, so the fee is not the
-  point -- the SPREAD is: these books run 10-75bp wide, and four crossings on a 30-75bp
-  book cost 0.6-1.5% against a ~3% edge. The edge accrues over days, so waiting minutes
-  for a passive fill costs nothing measurable. The exit gets the same treatment, starting
-  at the scheduled time.
+P&L shown is indicative: MEXC last prices when you tapped "shorted" and "closed", not your
+fills.
 
-  python3 unlock_bot.py --datadir ./unlocks             # dry run: alerts + paper fills
-  python3 unlock_bot.py --datadir ./unlocks --live      # real orders (needs MEXC_FUTURES_*)
-  python3 unlock_bot.py --datadir ./unlocks --scan      # one refresh, print candidates, exit
+  python3 unlock_bot.py --datadir ./unlocks           # run
+  python3 unlock_bot.py --datadir ./unlocks --scan    # one refresh, print candidates, exit
 """
 import argparse
 import bisect
-import gzip
 import json
-import math
 import os
 import time
 import traceback
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import mexc_api
-import mexc_futures as mf
 import telegram_notify as tg
 
 DAY = 86400
@@ -64,6 +61,7 @@ GECKO_LIST = "https://api.coingecko.com/api/v3/coins/list"
 GECKO_PRICES = "https://api.coingecko.com/api/v3/simple/price"
 UA = {"User-Agent": "unlock-bot/1.0"}
 HEDGE = "BTC_USDT"
+REMIND_AGAIN_H = 6
 
 
 def now_s():
@@ -78,6 +76,11 @@ def _get_json(url, timeout=60):
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
+
+
+def last_price(contract):
+    t = mexc_api.get("/ticker", {"symbol": contract}) or {}
+    return float(t.get("lastPrice") or 0)
 
 
 # ---------------------------------------------------------------------------- schedules
@@ -145,10 +148,6 @@ class UnlockBot:
         self.a = a
         self.dir = a.datadir
         os.makedirs(os.path.join(self.dir, "requests"), exist_ok=True)
-        self.live = a.live
-        self.ex = mf.MexcFutures()
-        if self.live and not self.ex.enabled():
-            raise SystemExit("--live needs MEXC_FUTURES_KEY and MEXC_FUTURES_SECRET")
         self.state_path = os.path.join(self.dir, "state.json")
         self.state = self._load()
         self.last_refresh = 0
@@ -217,8 +216,8 @@ class UnlockBot:
 
     def refresh(self):
         """Rebuild candidates.json: every cliff >= 2% in the next 30 days on a token with
-        an API-tradeable MEXC crypto perp whose price agrees with CoinGecko's for the
-        scheduled token (a ticker shared by two coins is the main way this data lies)."""
+        a MEXC crypto perp whose price agrees with CoinGecko's for the scheduled token (a
+        ticker shared by two coins is the main way this data lies)."""
         t0 = now_s()
         scheds = fetch_schedules()
         gsym = self._gecko_symbols()
@@ -237,8 +236,6 @@ class UnlockBot:
                 cs = f"{sym}_USDT"
                 c = detail.get(cs)
                 ok, why = (mexc_api.is_crypto_token(c) if c else (False, "no MEXC perp"))
-                if c and ok and not c.get("apiAllowed"):
-                    ok, why = False, "MEXC API not allowed"
                 tk = tickers.get(cs) or {}
                 rows.append({"key": f"{sym}_{day_str(k).replace('-', '')}", "sym": sym,
                              "contract": cs, "project": s["name"], "gecko": s["gecko"],
@@ -265,15 +262,15 @@ class UnlockBot:
 
     def _check_schedule_changes(self, rows):
         """An open trade whose unlock vanished or moved is the 'project delayed it' case:
-        the reason for the short is gone. Alert, don't act -- a schedule edit can also be
-        DefiLlama tidying data."""
+        the reason for the short is gone. Warn -- a schedule edit can also be DefiLlama
+        tidying data, so the call is yours."""
         live = {r["key"] for r in rows}
         for key, t in self.state["trades"].items():
-            if t["status"] in ("open", "opening") and key not in live and not t.get("sched_warned"):
+            if t["status"] == "open" and key not in live and not t.get("sched_warned"):
                 t["sched_warned"] = True
                 self.notify(f"⚠️ <b>{t['sym']}</b>: the {t['unlock']} unlock is no longer in "
-                            f"DefiLlama's schedule (delayed or re-dated?). Check it; "
-                            f"/unlock_close {t['sym']} closes the trade.")
+                            f"DefiLlama's schedule (delayed or re-dated?). Check it; close "
+                            f"the short if the unlock moved.")
         self.save()
 
     def alerts(self, rows):
@@ -289,17 +286,21 @@ class UnlockBot:
                 continue
             self.state["alerted"][key] = now
             self.save()
+            n = self.a.notional
+            px = r["mexc_px"]
+            qty = f" ≈ {n / px:,.0f} {r['sym']}" if px else ""
             rare = "rare unlocker" if r["big_cliffs_past_yr"] <= 6 else "frequent unlocker"
             msg = (f"🔓 <b>Unlock short: {r['sym']}</b> ({r['project']})\n"
                    f"unlock {r['unlock']} 00:00 UTC — in {days:.1f} days\n"
                    f"size <b>{r['size']:.1%}</b> of circulating · {', '.join(r['cats']) or 'n/a'}\n"
                    f"{r['big_cliffs_past_yr']} cliffs ≥2% in past year ({rare})\n"
-                   f"MEXC {r['contract']} · 24h vol ${r['vol24_usd'] / 1e3:,.0f}k · "
-                   f"funding {r['funding'] * 1e4:+.1f}bp\n"
-                   f"plan: short ${self.a.notional:.0f} + long ${self.a.notional:.0f} BTC, 1x "
-                   f"isolated, close {day_str(r['unlock_ts'] + DAY)} 00:00 UTC\n"
-                   f"<i>verify the date: tokenomist.ai/{r['gecko']}</i>")
-            self.notify(msg, buttons=[[(f"Short {r['sym']}", f"unl:go:{key}"),
+                   f"24h vol ${r['vol24_usd'] / 1e3:,.0f}k · funding {r['funding'] * 1e4:+.1f}bp\n\n"
+                   f"<b>On MEXC futures</b> (Isolated, 1x, Post Only at the touch):\n"
+                   f"1. {r['contract']}: open SHORT ${n:.0f}{qty}\n"
+                   f"2. {HEDGE}: open LONG ${n:.0f}\n"
+                   f"close both {day_str(r['unlock_ts'] + DAY)} 00:00 UTC (I'll remind you)\n"
+                   f"<i>verify the date first: tokenomist.ai/{r['gecko']}</i>")
+            self.notify(msg, buttons=[[(f"✅ I shorted {r['sym']}", f"unl:go:{key}"),
                                        ("Skip", f"unl:skip:{key}")]])
 
     def candidate(self, key=None, sym=None):
@@ -312,175 +313,53 @@ class UnlockBot:
         for r in rows:
             if key and r["key"] == key:
                 return r
-            if sym and not key and r["sym"] == sym.upper() and r["unlock_ts"] > now and r["tradeable"]:
+            if sym and not key and r["sym"] == sym.upper() and r["unlock_ts"] + DAY > now and r["tradeable"]:
                 return r
         return None
 
-    # ---- execution ---------------------------------------------------------------------
-    @staticmethod
-    def _round_px(px, unit):
-        dec = max(0, -int(math.floor(math.log10(unit)))) if unit < 1 else 0
-        return round(round(px / unit) * unit, dec)
-
-    def work(self, contract, side, vol, position_id=None, tag=""):
-        """Fill `vol` contracts maker-first, then taker. Returns (filled, avg_px)."""
-        is_buy = side in (mf.OPEN_LONG, mf.CLOSE_SHORT)
-        info = self.ex.contract(contract)
-        unit = float(info["priceUnit"])
-        if not self.live:
-            tk = self.ex.ticker(contract)
-            px = float(tk["bid1"] if is_buy else tk["ask1"])
-            self.log(f"PAPER {tag} {contract} side={side} vol={vol} @ {px} (resting at touch)")
-            return vol, px
-        filled, notional = 0, 0.0
-        deadline = now_s() + self.a.maker_minutes * 60
-        errors = 0
-        while filled < vol and now_s() < deadline and errors < 5:
-            tk = self.ex.ticker(contract)
-            px = self._round_px(float(tk["bid1"] if is_buy else tk["ask1"]), unit)
-            try:
-                oid = self.ex.submit(contract, side, vol - filled, price=px,
-                                     order_type=mf.POST_ONLY, position_id=position_id)
-            except mf.MexcFuturesError as e:
-                errors += 1
-                self.log(f"{tag} post-only rejected ({e}); retry")
-                time.sleep(3)
-                continue
-            rest_until = min(deadline, now_s() + self.a.repeg_sec)
-            o = None
-            while now_s() < rest_until:
-                time.sleep(4)
-                o = self.ex.get_order(oid)
-                if int(o.get("state", 0)) in (mf.ST_FILLED, mf.ST_CANCELLED, mf.ST_INVALID):
-                    break
-                touch = float(self.ex.ticker(contract)["bid1" if is_buy else "ask1"])
-                if abs(touch - px) >= unit / 2:
-                    break                           # market moved: re-peg
-            if o is None or int(o.get("state", 0)) == mf.ST_OPEN:
-                try:
-                    self.ex.cancel([oid])
-                except mf.MexcFuturesError as e:
-                    self.log(f"{tag} cancel {oid}: {e}")      # usually: filled meanwhile
-                time.sleep(1)
-                o = self.ex.get_order(oid)
-            dv = float(o.get("dealVol") or 0)
-            if dv:
-                filled += dv
-                notional += dv * float(o.get("dealAvgPrice") or px)
-                self.log(f"{tag} maker fill {dv} @ {o.get('dealAvgPrice')} ({filled}/{vol})")
-        if filled < vol:
-            rest = vol - filled
-            oid = self.ex.submit(contract, side, rest, order_type=mf.MARKET, position_id=position_id)
-            for _ in range(15):
-                time.sleep(2)
-                o = self.ex.get_order(oid)
-                if int(o.get("state", 0)) in (mf.ST_FILLED, mf.ST_CANCELLED, mf.ST_INVALID):
-                    break
-            dv = float(o.get("dealVol") or 0)
-            filled += dv
-            notional += dv * float(o.get("dealAvgPrice") or 0)
-            self.log(f"{tag} taker fill {dv} @ {o.get('dealAvgPrice')} ({filled}/{vol})")
-        return filled, (notional / filled if filled else 0.0)
-
-    def _vol_for(self, contract, usd):
-        info = self.ex.contract(contract)
-        px = float(self.ex.ticker(contract)["lastPrice"])
-        vol = int(usd / (px * float(info["contractSize"])))
-        return max(vol, int(info.get("minVol") or 1)), px, float(info["contractSize"])
-
-    def open_trade(self, key):
+    # ---- trades you report -------------------------------------------------------------
+    def record_open(self, key):
         r = self.candidate(key=key)
         if r is None:
-            return self.notify(f"❌ {key}: not in the current candidate list (refreshing daily); not traded")
+            return self.notify(f"❌ {key}: not in the current candidate list; not recorded")
         if key in self.state["trades"]:
-            return self.notify(f"{r['sym']}: already {self.state['trades'][key]['status']}")
-        if r["unlock_ts"] + DAY <= now_s():
-            return self.notify(f"❌ {r['sym']}: the unlock day is over; not traded")
-        n_open = sum(1 for t in self.state["trades"].values() if t["status"] in ("open", "opening"))
-        if n_open >= self.a.max_open:
-            return self.notify(f"❌ {r['sym']}: {n_open} trades already open (cap {self.a.max_open})")
-        if self.live:
-            need = 2 * self.a.notional * 1.1
-            avail = self.ex.usdt_available()
-            if avail < need:
-                return self.notify(f"❌ {r['sym']}: futures wallet has ${avail:,.0f} available, "
-                                   f"needs ${need:,.0f}. Transfer USDT spot→futures first.")
-        t = {"key": key, "sym": r["sym"], "contract": r["contract"], "unlock": r["unlock"],
-             "unlock_ts": r["unlock_ts"], "size": r["size"], "status": "opening",
-             "paper": not self.live, "opened_at": now_s(),
-             "close_at": r["unlock_ts"] + DAY + 300, "alerted_adverse": []}
-        self.state["trades"][key] = t
-        self.save()
-        self.notify(f"⏳ opening <b>{r['sym']}</b> short + BTC long, maker first "
-                    f"(up to {self.a.maker_minutes} min per leg)…")
+            return self.notify(f"{r['sym']}: already recorded")
         try:
-            vol, _, csize = self._vol_for(r["contract"], self.a.notional)
-            f_alt, px_alt = self.work(r["contract"], mf.OPEN_SHORT, vol, tag=f"{r['sym']} open")
-            t["alt"] = {"vol": f_alt, "px": px_alt, "csize": csize}
-            self.save()
-            if f_alt <= 0:
-                t["status"] = "failed"
-                self.save()
-                return self.notify(f"❌ {r['sym']}: short did not fill; nothing open")
-            hv, _, hcs = self._vol_for(HEDGE, f_alt * csize * px_alt)
-            f_btc, px_btc = self.work(HEDGE, mf.OPEN_LONG, hv, tag=f"{r['sym']} hedge")
-            t["btc"] = {"vol": f_btc, "px": px_btc, "csize": hcs}
-            t["status"] = "open"
-            self.save()
-            self.notify(f"✅ <b>{r['sym']}</b> {'PAPER ' if t['paper'] else ''}open: short "
-                        f"{f_alt:g} ct @ {px_alt:.6g} (${f_alt * csize * px_alt:,.0f}), long BTC "
-                        f"{f_btc:g} ct @ {px_btc:,.1f} (${f_btc * hcs * px_btc:,.0f}).\n"
-                        f"auto-close {day_str(t['close_at'])} 00:05 UTC · /unlock_close {r['sym']} to close early")
+            alt_px, btc_px = last_price(r["contract"]), last_price(HEDGE)
         except Exception as e:
-            t["status"] = "check"
-            t["error"] = str(e)
-            self.save()
-            self.log(traceback.format_exc())
-            self.notify(f"🆘 <b>{r['sym']}</b> open failed part-way: {e}\n"
-                        f"Check MEXC futures positions/orders by hand.")
+            alt_px = btc_px = 0.0
+            self.log(f"price snapshot failed: {e}")
+        close_at = r["unlock_ts"] + DAY
+        self.state["trades"][key] = {
+            "key": key, "sym": r["sym"], "contract": r["contract"], "unlock": r["unlock"],
+            "unlock_ts": r["unlock_ts"], "size": r["size"], "status": "open",
+            "opened_at": now_s(), "close_at": close_at, "alt_px": alt_px, "btc_px": btc_px,
+            "notional": self.a.notional, "alerted_adverse": [], "reminders": 0}
+        self.save()
+        self.notify(f"📝 <b>{r['sym']}</b> short recorded (ref {alt_px:.6g}, BTC {btc_px:,.0f}).\n"
+                    f"I'll remind you to close at {day_str(close_at)} 00:00 UTC and warn if it "
+                    f"squeezes. /unlock_close {r['sym']} once you've closed.")
 
-    def close_trade(self, key, why):
-        t = self.state["trades"][key]
-        if t["status"] not in ("open", "check"):
-            return
-        t["status"] = "closing"
-        self.save()
-        try:
-            pnl = 0.0
-            for leg, contract, side in (("alt", t["contract"], mf.CLOSE_SHORT),
-                                        ("btc", HEDGE, mf.CLOSE_LONG)):
-                L = t.get(leg)
-                if not L or not L.get("vol"):
-                    continue
-                pid, vol = None, L["vol"]
-                if self.live:
-                    want = 2 if side == mf.CLOSE_SHORT else 1      # positionType 1 long, 2 short
-                    pos = [p for p in self.ex.open_positions(contract)
-                           if int(p.get("positionType", 0)) == want]
-                    if not pos:
-                        self.log(f"{t['sym']} {leg}: no {contract} position on MEXC; skipping")
-                        continue
-                    pid = pos[0].get("positionId")
-                    vol = min(vol, float(pos[0].get("holdVol") or vol))
-                f, px = self.work(contract, side, vol, position_id=pid, tag=f"{t['sym']} close {leg}")
-                L["exit_px"] = px
-                sign = -1 if leg == "alt" else 1
-                pnl += sign * (px - L["px"]) * f * L["csize"]
-            t["pnl"] = round(pnl, 2)
-            t["status"] = "closed"
-            t["closed_at"] = now_s()
-            t["close_reason"] = why
+    def record_close(self, sym, why="you closed it"):
+        keys = [k for k, t in self.state["trades"].items() if t["sym"] == sym and t["status"] == "open"]
+        if not keys:
+            return self.notify(f"no open unlock trade recorded for {sym}")
+        for k in keys:
+            t = self.state["trades"][k]
+            try:
+                alt, btc = last_price(t["contract"]), last_price(HEDGE)
+            except Exception:
+                alt = btc = 0.0
+            pnl = None
+            if t["alt_px"] and t["btc_px"] and alt and btc:
+                n = t["notional"]
+                pnl = n * (-(alt / t["alt_px"] - 1) + (btc / t["btc_px"] - 1))
+            t.update(status="closed", closed_at=now_s(), alt_exit=alt, btc_exit=btc,
+                     pnl=None if pnl is None else round(pnl, 2), close_reason=why)
             self.save()
-            a = t["alt"]
-            self.notify(f"🏁 <b>{t['sym']}</b> {'PAPER ' if t['paper'] else ''}closed ({why}): "
-                        f"short {a['px']:.6g} → {a.get('exit_px', 0):.6g}, "
-                        f"P&amp;L incl. BTC hedge <b>${pnl:+.2f}</b> (before funding)")
-        except Exception as e:
-            t["status"] = "check"
-            t["error"] = str(e)
-            self.save()
-            self.log(traceback.format_exc())
-            self.notify(f"🆘 <b>{t['sym']}</b> close failed part-way: {e}\nCheck MEXC by hand.")
+            ptxt = f"indicative P&amp;L <b>${pnl:+.2f}</b> on ${t['notional']:.0f} (last prices, before fees/funding)" \
+                if pnl is not None else "no price for P&amp;L"
+            self.notify(f"🏁 <b>{sym}</b> marked closed: {ptxt}")
 
     # ---- loop pieces -------------------------------------------------------------------
     def requests(self):
@@ -497,78 +376,69 @@ class UnlockBot:
                 continue
             act, key, sym = req.get("action"), req.get("key"), (req.get("sym") or "").upper()
             self.log(f"request {req}")
-            if act == "go":
-                if not key and sym:
-                    r = self.candidate(sym=sym)
-                    key = r["key"] if r else None
+            if act in ("go", "skip") and not key and sym:
+                r = self.candidate(sym=sym)
+                key = r["key"] if r else None
                 if not key:
-                    self.notify(f"❌ no upcoming tradeable unlock for {sym or '?'} — /unlocks lists them")
+                    self.notify(f"❌ no upcoming unlock for {sym} — /unlocks lists them")
                     continue
-                self.open_trade(key)
-            elif act == "skip":
-                if not key and sym:
-                    r = self.candidate(sym=sym)
-                    key = r["key"] if r else None
-                if key:
-                    self.state["skipped"][key] = now_s()
-                    self.save()
-                    self.notify(f"skipped {key}")
+            if act == "go" and key:
+                self.record_open(key)
+            elif act == "skip" and key:
+                self.state["skipped"][key] = now_s()
+                self.save()
             elif act == "close":
-                keys = [k for k, t in self.state["trades"].items()
-                        if t["sym"] == sym and t["status"] in ("open", "check")]
-                if not keys:
-                    self.notify(f"no open unlock trade for {sym}")
-                for k in keys:
-                    self.close_trade(k, "manual")
+                self.record_close(sym)
 
-    def schedule_exits(self):
-        for key, t in list(self.state["trades"].items()):
-            if t["status"] == "open" and now_s() >= t["close_at"]:
-                self.close_trade(key, "end of unlock day")
+    def reminders(self):
+        for t in self.state["trades"].values():
+            if t["status"] != "open" or now_s() < t["close_at"]:
+                continue
+            due = t["close_at"] + t["reminders"] * REMIND_AGAIN_H * 3600
+            if now_s() < due or t["reminders"] >= 4:
+                continue
+            t["reminders"] += 1
+            self.save()
+            again = " (reminder)" if t["reminders"] > 1 else ""
+            self.notify(f"⏰ <b>Close {t['sym']} now</b>{again} — the {t['unlock']} unlock day is over.\n"
+                        f"MEXC futures: close the {t['contract']} SHORT and the {HEDGE} LONG "
+                        f"(Post Only at the touch; market if it doesn't fill in ~20 min).\n"
+                        f"Then /unlock_close {t['sym']}",
+                        buttons=[[(f"✅ Closed {t['sym']}", f"unl:close:{t['sym']}")]])
 
     def marks(self):
-        """Adverse-move alerts on the short leg (the squeeze tail is the risk)."""
+        """Squeeze warnings on the short leg (the tail is the risk)."""
         if now_s() - self.last_marks < 300:
             return
         self.last_marks = now_s()
         for t in self.state["trades"].values():
-            if t["status"] != "open" or not t.get("alt"):
+            if t["status"] != "open" or not t.get("alt_px"):
                 continue
             try:
-                px = float(self.ex.ticker(t["contract"])["lastPrice"])
+                px = last_price(t["contract"])
             except Exception:
                 continue
-            up = px / t["alt"]["px"] - 1
+            if not px:
+                continue
+            up = px / t["alt_px"] - 1
             t["last_px"] = px
             for lvl in (0.25, 0.50):
                 if up >= lvl and lvl not in t["alerted_adverse"]:
                     t["alerted_adverse"].append(lvl)
                     self.notify(f"⚠️ <b>{t['sym']}</b> is {up:+.0%} against the short "
-                                f"(entry {t['alt']['px']:.6g}, now {px:.6g}). 1x isolated "
-                                f"liquidates near +100%. /unlock_close {t['sym']} to close.")
-        self.save()
-
-    def startup_check(self):
-        for t in self.state["trades"].values():
-            if t["status"] in ("opening", "closing"):
-                was = "open" if t["status"] == "opening" else "close"
-                t["status"] = "check"
-                self.notify(f"🆘 <b>{t['sym']}</b> was mid-{was} when the bot restarted. "
-                            f"Check MEXC by hand; /unlock_close {t['sym']} closes whatever "
-                            f"the state file recorded.")
+                                f"(ref {t['alt_px']:.6g}, now {px:.6g}). 1x isolated "
+                                f"liquidates near +100%.")
         self.save()
 
     def run(self):
-        self.log(f"unlock bot up | {'LIVE' if self.live else 'DRY RUN'} | notional "
-                 f"${self.a.notional:.0f} | min size {self.a.min_size:.0%} | window "
-                 f"T-{self.a.entry_days}..T-{self.a.late_days}")
-        self.startup_check()
+        self.log(f"unlock alerts up | ${self.a.notional:.0f}/leg | min size {self.a.min_size:.0%} "
+                 f"| window T-{self.a.entry_days}..T-{self.a.late_days}")
         while True:
             try:
                 if now_s() - self.last_refresh > self.a.refresh_hours * 3600:
                     self.alerts(self.refresh())
                 self.requests()
-                self.schedule_exits()
+                self.reminders()
                 self.marks()
             except Exception as e:
                 self.log(f"loop error: {e}\n{traceback.format_exc()}")
@@ -580,21 +450,17 @@ class UnlockBot:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--datadir", default="./unlocks")
-    p.add_argument("--live", action="store_true", help="place real orders")
-    p.add_argument("--notional", type=float, default=100.0, help="USD per leg")
+    p.add_argument("--notional", type=float, default=100.0, help="USD per leg, for the alert text")
     p.add_argument("--min-size", type=float, default=0.05, help="cliff as a fraction of circulating")
     p.add_argument("--entry-days", type=float, default=5.5, help="alert from this many days before")
     p.add_argument("--late-days", type=float, default=1.5, help="no alert closer than this")
-    p.add_argument("--max-open", type=int, default=6)
-    p.add_argument("--maker-minutes", type=float, default=20)
-    p.add_argument("--repeg-sec", type=float, default=30)
     p.add_argument("--refresh-hours", type=float, default=12)
     p.add_argument("--scan", action="store_true", help="refresh once, print candidates, exit")
     a = p.parse_args()
     bot = UnlockBot(a)
     if a.scan:
         for r in bot.refresh():
-            flag = "TRADE" if r["tradeable"] and r["size"] >= a.min_size else ""
+            flag = "ALERT" if r["tradeable"] and r["size"] >= a.min_size else ""
             print(f"{r['unlock']}  {r['sym']:8s} {r['size']:6.1%}  past-yr {r['big_cliffs_past_yr']:2d}  "
                   f"{'ok' if r['tradeable'] else r['why_not']:30s} {flag}")
         return
