@@ -469,6 +469,28 @@ def _unlock_cmd(action, args):
     return None          # the unlock bot confirms within ~10s
 
 
+# ---- wake-up watch (wake_watch.py, its own service) -----------------------------------
+WAKE_DIR = os.environ.get("WAKE_DATADIR", "/opt/hyperdata/wakewatch")
+
+
+def cmd_wake():
+    """Coins the wake-up watch is following, then its running tally."""
+    import wake_watch
+    w = wake_watch.Watch(WAKE_DIR)
+    st = w.load_state()
+    now = time.time() * 1000
+    lines = ["<b>Wake-up watch</b> — old spikers: funding climbing, MEXC offers thinning, price flat"]
+    for sym, x in sorted(st["active"].items(), key=lambda kv: kv[1]["ts"]):
+        lines.append(f"• {sym}: {(now - x['ts']) / 3_600_000:.0f}h in, {x['entry']:.6g} → {x['last']:.6g} "
+                     f"({x['last'] / x['entry'] - 1:+.0%}, max {x['hi'] / x['entry'] - 1:+.0%})")
+    if not st["active"]:
+        lines.append("nothing being watched right now")
+    if st.get("last_sweep"):
+        lines.append(f"<i>last sweep {datetime.fromtimestamp(st['last_sweep'] / 1000, timezone.utc):%m-%d %H:%M} UTC</i>")
+    lines.append(w.stats_line())
+    return "\n".join(lines)
+
+
 ARG_HANDLERS = {
     "/unlock_go": lambda args: _unlock_cmd("go", args),
     "/unlock_skip": lambda args: _unlock_cmd("skip", args),
@@ -507,6 +529,7 @@ HELP = (
     "/unlocks — pre-unlock shorts: your open ones + upcoming unlocks\n"
     "/unlock_go SYM — I've shorted SYM (starts close reminder + squeeze watch)\n"
     "/unlock_close SYM — I've closed SYM · /unlock_skip SYM — not trading it\n"
+    "/wake — wake-up watch: old spikers waking up (AIN pattern), followed 72h, hit rate so far\n"
     "/help — this message")
 
 HANDLERS = {
@@ -520,6 +543,7 @@ HANDLERS = {
     "/resume": cmd_resume,
     "/update": cmd_update,
     "/unlocks": cmd_unlocks,
+    "/wake": cmd_wake,
     "/help": lambda: HELP,
     "/start": lambda: HELP,
 }
@@ -538,6 +562,7 @@ MENU = [
     ("update", "git pull + restart the bots"),
     ("unlocks", "pre-unlock shorts: open trades + upcoming"),
     ("unlock_close", "mark an unlock short closed: /unlock_close SYM"),
+    ("wake", "wake-up watch: coins followed + hit rate"),
     ("help", "list commands"),
 ]
 

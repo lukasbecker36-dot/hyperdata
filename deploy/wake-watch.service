@@ -1,0 +1,20 @@
+[Unit]
+Description=Wake-up watch (alerts on old spikers waking up, AIN pattern) via @Hyperfadebot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+EnvironmentFile=-/etc/hyperdata/telegram.env
+# Reads the basis-trade engine's hourly scam-screen logs (world-readable); alerts only.
+Environment=SCAM_LOG_DIR=/opt/basis-trade/output
+ExecStart=/usr/bin/python3 /opt/hyperdata/wake_watch.py --datadir /opt/hyperdata/wakewatch
+Restart=always
+RestartSec=30
+StandardOutput=append:/opt/hyperdata/wakewatch/service.out
+StandardError=append:/opt/hyperdata/wakewatch/service.err
+
+[Install]
+WantedBy=multi-user.target
