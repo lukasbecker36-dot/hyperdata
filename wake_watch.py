@@ -20,10 +20,16 @@ so it proves nothing yet. This collects the out-of-sample cases: each match is a
 once (re-arm 72h), reported at 24h and 72h, and appended to wake_watch_results.csv;
 the 72h report and /wake carry the running hit rate.
 
-Two tighter variants are tagged on every alert and tallied separately (tags only, so they
-are scored on the same cases): "flat" = price within +-5% of 6h ago (the first live alerts
-often fired after a small run-up), "liquid" = Aster 24h volume >= $50k (on near-dead books
-thin MEXC offers just mean nobody is quoting).
+Variants are tagged on every alert and tallied separately (tags only, so they are scored
+on the same cases): "flat" = price within +-5% of 6h ago (the first live alerts often fired
+after a small run-up), "liquid" = Aster 24h volume >= $50k (on near-dead books thin MEXC
+offers just mean nobody is quoting), "carry" = 72h mean funding +13-30%/yr.
+
+CARRY RULE (silent paper trades, no Telegram per signal; tally in /wake and carry_results.csv):
+the one timing-free tilt that held up in backtests -- old spiker (+50% day in 30d, listed >= 60d),
+price within +-10% of 6h ago, 72h mean funding +13-30%/yr. Long $100, TP +100% / SL -25% / 72h.
+Binance 2023-26: +1.9%/trade (90% CI +1.0..+2.8, 1,926 signals); Aster May-Oct 26: +2.4%.
+Negative 3-day funding did the opposite (-1.0%). No hour-scale wake-up timing tell was found.
 
 DATA: the basis-trade engine's hourly scam-screen logs (SCAM_LOG_DIR, default
 /opt/basis-trade/output/scam_log_YYYYMMDD.csv[.gz]) -- funding, MEXC depth bands, marks,
@@ -55,8 +61,12 @@ MIN_AGE_DAYS = 60.0
 REARM_HOURS = 72.0
 FLAT_MOVE = 0.05         # variant "flat": price within +-5% of 6h ago
 LIQUID_VOL = 50_000.0    # variant "liquid": Aster 24h volume >= $50k
+CARRY_LO, CARRY_HI = 0.13, 0.30   # variant / paper rule "carry": 72h mean funding in this band (%/yr as fraction)
+CARRY_TP, CARRY_SL, CARRY_HOURS = 1.0, 0.25, 72.0
+HISTORY_HOURS = 76.0     # enough for the 72h funding mean
 RESULT_COLS = ["signal_ms", "symbol", "entry", "max_24h", "min_24h", "ret_24h",
-               "max_72h", "min_72h", "ret_72h", "flat", "liquid"]
+               "max_72h", "min_72h", "ret_72h", "flat", "liquid", "carry"]
+CARRY_COLS = ["signal_ms", "symbol", "entry", "fund72", "exit_ms", "ret", "reason", "max", "min"]
 
 
 def _num(v):
@@ -66,7 +76,7 @@ def _num(v):
         return None
 
 
-def load_history(now_ms, hours=40.0, log_dir=None):
+def load_history(now_ms, hours=HISTORY_HOURS, log_dir=None):
     """symbol -> sweep rows from the last `hours`, oldest first."""
     log_dir = Path(log_dir or LOG_DIR)
     since = now_ms - hours * HOUR_MS
@@ -127,7 +137,9 @@ def features(rows, now_ms):
     if len(base) < 12 or len(asks) < 12 or not recent or not then or not cur["mark"]:
         return None
     med_ask = statistics.median(asks)
+    f72 = between(0, 72, "fund")
     return {
+        "fund72": statistics.mean(f72) if len(f72) >= 48 else None,
         "fund": cur["fund"], "d_fund": statistics.mean(recent) - statistics.median(base),
         "fund_base": statistics.median(base),
         "ask_ratio": (cur["ask5"] / med_ask) if cur["ask5"] is not None and med_ask > 0 else None,
@@ -144,14 +156,49 @@ def matches(f):
         and f["gain30"] >= PRIOR_SPIKE and f["age"] >= MIN_AGE_DAYS)
 
 
+def carry_band(f):
+    return f.get("fund72") is not None and CARRY_LO <= f["fund72"] < CARRY_HI
+
+
+def carry_matches(f):
+    """The backtested rule (Binance 2023-26 +1.9%/trade, Aster +2.4%, TP+100/SL-25/72h): an old spiker
+    that hasn't moved in 6h while longs have paid a steady, mild +13-30%/yr for 3 days.
+    Broader than the AIN filter -- it needs none of the funding-jump / thin-offer conditions."""
+    return bool(
+        f and carry_band(f) and f["gain30"] is not None and f["age"] is not None
+        and abs(f["px_chg6"]) < MAX_MOVE and f["gain30"] >= PRIOR_SPIKE and f["age"] >= MIN_AGE_DAYS)
+
+
 def variants(f):
     """Which tighter variants this alert also passes."""
     return {"flat": abs(f["px_chg6"]) < FLAT_MOVE,
-            "liquid": f.get("vol") is not None and f["vol"] >= LIQUID_VOL}
+            "liquid": f.get("vol") is not None and f["vol"] >= LIQUID_VOL,
+            "carry": carry_band(f)}
 
 
 def tags(x):
-    return " · ".join(f"{k} {'✓' if x.get(k) else '✗'}" for k in ("flat", "liquid"))
+    return " · ".join(f"{k} {'✓' if x.get(k) else '✗'}" for k in ("flat", "liquid", "carry"))
+
+
+def _append_csv(path, cols, row):
+    """Append a row; if the file has an older header, rewrite it under the new one first."""
+    old = []
+    if path.exists():
+        with open(path, newline="") as f:
+            rd = csv.DictReader(f)
+            if rd.fieldnames == cols:
+                old = None
+            else:
+                old = list(rd)
+    if old is None:
+        with open(path, "a", newline="") as f:
+            csv.DictWriter(f, fieldnames=cols).writerow(row)
+        return
+    with open(path, "w", newline="") as f:
+        wr = csv.DictWriter(f, fieldnames=cols, restval="")
+        wr.writeheader()
+        wr.writerows({k: r.get(k, "") for k in cols} for r in old)
+        wr.writerow(row)
 
 
 def _tally(rows):
@@ -169,6 +216,7 @@ class Watch:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.dir / "wake_watch.json"
         self.results_file = self.dir / "wake_watch_results.csv"
+        self.carry_file = self.dir / "carry_results.csv"
 
     def load_state(self):
         try:
@@ -178,6 +226,7 @@ class Watch:
         st.setdefault("active", {})
         st.setdefault("last_alert", {})
         st.setdefault("last_sweep", 0)
+        st.setdefault("carry", {})
         return st
 
     def save_state(self, st):
@@ -198,10 +247,60 @@ class Watch:
             return "no completed watches yet"
         out = [_tally(rows)]
         for lab, keep in (("flat (±5%/6h)", ("flat",)), ("liquid (≥$50k/day)", ("liquid",)),
-                          ("flat+liquid", ("flat", "liquid"))):
+                          ("flat+liquid", ("flat", "liquid")), ("carry (3d funding +13-30%)", ("carry",))):
             sub = [r for r in rows if all(r.get(k) == "1" for k in keep)]
             out.append(f"{lab}: " + (_tally(sub) if sub else "none completed"))
         return "\n".join(out)
+
+    def carry_results(self):
+        try:
+            with open(self.carry_file, newline="") as f:
+                return list(csv.DictReader(f))
+        except FileNotFoundError:
+            return []
+
+    def carry_line(self, st=None):
+        """Running tally of the silent paper rule."""
+        st = st or self.load_state()
+        rows = self.carry_results()
+        open_ = st["carry"]
+        head = (f"carry rule (paper, $100 each, TP +100% / SL −25% / 72h; backtest ≈ +1.5%/trade net): "
+                f"{len(open_)} open")
+        if open_:
+            unreal = sum(100 * (x["last"] / x["entry"] - 1) for x in open_.values())
+            head += f" (${unreal:+,.0f} unrealised)"
+        if not rows:
+            return head + ", none closed yet"
+        r = [float(x["ret"]) for x in rows]
+        return (head + f", {len(r)} closed: ${100 * sum(r):+,.0f} total, mean {statistics.mean(r):+.1%}, "
+                f"median {statistics.median(r):+.1%}, {sum(x['reason'] == 'tp' for x in rows)} hit +100%, "
+                f"{sum(x['reason'] == 'sl' for x in rows)} stopped (before costs)")
+
+    def _carry_step(self, st, now_ms, hist, marks):
+        for sym, x in list(st["carry"].items()):
+            px = marks.get(sym)
+            if px:
+                x["hi"], x["lo"], x["last"] = max(x["hi"], px), min(x["lo"], px), px
+            ret, reason = x["last"] / x["entry"] - 1, None
+            if ret <= -CARRY_SL:
+                ret, reason = -CARRY_SL, "sl"
+            elif ret >= CARRY_TP:
+                ret, reason = CARRY_TP, "tp"
+            elif now_ms - x["ts"] >= CARRY_HOURS * HOUR_MS:
+                reason = "time"
+            if reason:
+                _append_csv(self.carry_file, CARRY_COLS, {
+                    "signal_ms": int(x["ts"]), "symbol": sym, "entry": f"{x['entry']:.6g}", "fund72": f"{x['fund72']:.4g}",
+                    "exit_ms": int(now_ms), "ret": f"{ret:.6g}", "reason": reason,
+                    "max": f"{x['hi'] / x['entry'] - 1:.6g}", "min": f"{x['lo'] / x['entry'] - 1:.6g}"})
+                del st["carry"][sym]
+        for sym, rows in hist.items():
+            if sym in st["carry"]:
+                continue
+            f = features(rows, now_ms)
+            if carry_matches(f):
+                st["carry"][sym] = {"ts": now_ms, "entry": f["mark"], "hi": f["mark"], "lo": f["mark"],
+                                    "last": f["mark"], "fund72": f["fund72"]}
 
     def step(self, now_ms, hist=None):
         """Process the sweep at now_ms: follow-ups for watched coins, then new matches.
@@ -227,13 +326,10 @@ class Watch:
                        "ret_24h": w.get("r24", w["last"] / w["entry"] - 1),
                        "max_72h": w["hi"] / w["entry"] - 1, "min_72h": w["lo"] / w["entry"] - 1,
                        "ret_72h": w["last"] / w["entry"] - 1,
-                       "flat": int(bool(w.get("flat"))), "liquid": int(bool(w.get("liquid")))}
-                new = not self.results_file.exists()
-                with open(self.results_file, "a", newline="") as f:
-                    wr = csv.DictWriter(f, fieldnames=RESULT_COLS)
-                    if new:
-                        wr.writeheader()
-                    wr.writerow({k: (f"{v:.6g}" if isinstance(v, float) else v) for k, v in row.items()})
+                       "flat": int(bool(w.get("flat"))), "liquid": int(bool(w.get("liquid"))),
+                       "carry": int(bool(w.get("carry")))}
+                _append_csv(self.results_file, RESULT_COLS,
+                            {k: (f"{v:.6g}" if isinstance(v, float) else v) for k, v in row.items()})
                 del st["active"][sym]
                 msgs.append(f"🏁 wake-watch {sym} after 72h: {row['ret_72h']:+.0%} (max {row['max_72h']:+.0%}, "
                             f"min {row['min_72h']:+.0%})\nrunning tally — {self.stats_line()}")
@@ -251,9 +347,11 @@ class Watch:
                 f"  funding {f['fund']:+.0%}/yr, up {f['d_fund']:+.0%} on its baseline {f['fund_base']:+.0%}\n"
                 f"  MEXC offers within 5% at {f['ask_ratio']:.0%} of normal · price {f['px_chg6']:+.0%} over 6h\n"
                 f"  +{f['gain30']:.0%} day in the last 30d · listed {f['age']:.0f}d · scam score {f['score']:.0f}\n"
-                f"  Aster vol ${f.get('vol') or 0:,.0f}/24h · variants: {tags(st['active'][sym])}\n"
+                f"  Aster vol ${f.get('vol') or 0:,.0f}/24h · 3d funding "
+                f"{'n/a' if f.get('fund72') is None else format(f['fund72'], '+.0%')}/yr · variants: {tags(st['active'][sym])}\n"
                 f"  <i>WATCH ONLY: of the first 4 such cases 1 ran (AIN), 1 rose 21%, 2 went nowhere. "
                 f"Reports at 24h and 72h.</i>\n{self.stats_line()}")
+        self._carry_step(st, now_ms, hist, marks)
         st["last_sweep"] = now_ms
         self.save_state(st)
         return msgs

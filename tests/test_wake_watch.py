@@ -13,11 +13,12 @@ COLS = ["ts_ms", "symbol", "mark", "funding_apr", "mexc_ask_5pct", "max_day_gain
         "perp_volume_usd"]
 
 
-def ain_like(sym="AINUSDT", fund_now=0.6, ask_now=3.0, mark_now=0.040, gain=1.5, age=120, vol=200_000, end=NOW):
+def ain_like(sym="AINUSDT", fund_now=0.6, ask_now=3.0, mark_now=0.040, gain=1.5, age=120, vol=200_000, end=NOW,
+             hours=40, fund_base=0.11):
     rows = []
-    for i in range(40, -1, -1):
+    for i in range(hours, -1, -1):
         rows.append({"ts_ms": end - i * H, "symbol": sym, "mark": mark_now if i == 0 else 0.038,
-                     "funding_apr": fund_now if i <= 3 else 0.11, "mexc_ask_5pct": ask_now * 1000 if i == 0 else 5000,
+                     "funding_apr": fund_now if i <= 3 else fund_base, "mexc_ask_5pct": ask_now * 1000 if i == 0 else 5000,
                      "max_day_gain_30d": gain, "age_days": age, "score": 5, "perp_volume_usd": vol})
     return rows
 
@@ -107,3 +108,36 @@ def test_variants_tagged_and_tallied_separately(logs, tmp_path):
     assert "flat (±5%/6h): 2 completed: 1 reached +30%" in out
     assert "liquid (≥$50k/day): 2 completed: 1 reached +30%" in out
     assert "flat+liquid: 1 completed: 1 reached +30%, 0 reached +100%" in out
+
+
+def test_carry_rule_paper_trades(logs, tmp_path):
+    w = ww.Watch(tmp_path / "state")
+    calm = dict(fund_now=0.2, fund_base=0.2, ask_now=5.0, mark_now=0.038, hours=80)
+    write_log(logs, ain_like("UPUSDT", **calm) + ain_like("DOWNUSDT", **calm) + ain_like("FLATUSDT", **calm)
+              + ain_like("HOTUSDT", **{**calm, "fund_now": 0.5, "fund_base": 0.5})        # 50%/yr: out of band
+              + ain_like("NEGUSDT", **{**calm, "fund_now": -0.1, "fund_base": -0.1}))
+    hist = ww.load_history(NOW)
+    assert w.step(NOW, hist) == []                                       # silent: no Telegram messages
+    assert set(w.load_state()["carry"]) == {"UPUSDT", "DOWNUSDT", "FLATUSDT"}
+
+    def at(t, marks):
+        h = {k: list(v) for k, v in hist.items()}
+        for s, m in marks.items():
+            h[s].append({**h[s][-1], "ts": t, "mark": m})
+        return w.step(t, h)
+
+    at(NOW + 5 * H, {"UPUSDT": 0.080, "DOWNUSDT": 0.027, "FLATUSDT": 0.039})   # +110% -> tp, -29% -> sl
+    at(NOW + 72 * H, {"FLATUSDT": 0.0399})                                     # time exit +5%
+    res = {r["symbol"]: r for r in w.carry_results()}
+    assert (res["UPUSDT"]["reason"], float(res["UPUSDT"]["ret"])) == ("tp", 1.0)
+    assert (res["DOWNUSDT"]["reason"], float(res["DOWNUSDT"]["ret"])) == ("sl", -0.25)
+    assert res["FLATUSDT"]["reason"] == "time" and float(res["FLATUSDT"]["ret"]) == pytest.approx(0.05)
+    assert "3 closed: $+80 total" in w.carry_line()
+
+
+def test_results_header_upgrade(tmp_path):
+    p = tmp_path / "r.csv"
+    p.write_text("a,b\n1,2\n")
+    ww._append_csv(p, ["a", "b", "c"], {"a": 3, "b": 4, "c": 5})
+    ww._append_csv(p, ["a", "b", "c"], {"a": 6, "b": 7, "c": 8})
+    assert p.read_text().splitlines() == ["a,b,c", "1,2,", "3,4,5", "6,7,8"]

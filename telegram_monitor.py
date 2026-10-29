@@ -489,6 +489,7 @@ def cmd_wake():
     if st.get("last_sweep"):
         lines.append(f"<i>last sweep {datetime.fromtimestamp(st['last_sweep'] / 1000, timezone.utc):%m-%d %H:%M} UTC</i>")
     lines.append(w.stats_line())
+    lines.append(w.carry_line(st))
     return "\n".join(lines)
 
 
