@@ -493,6 +493,12 @@ def cmd_wake():
     return "\n".join(lines)
 
 
+def cmd_carry():
+    """P&L of the carry rule's paper trades (opened/closed silently by wake_watch.py)."""
+    import wake_watch
+    return wake_watch.Watch(WAKE_DIR).carry_report()
+
+
 ARG_HANDLERS = {
     "/unlock_go": lambda args: _unlock_cmd("go", args),
     "/unlock_skip": lambda args: _unlock_cmd("skip", args),
@@ -532,6 +538,7 @@ HELP = (
     "/unlock_go SYM — I've shorted SYM (starts close reminder + squeeze watch)\n"
     "/unlock_close SYM — I've closed SYM · /unlock_skip SYM — not trading it\n"
     "/wake — wake-up watch: old spikers waking up (AIN pattern), followed 72h, hit rate so far\n"
+    "/carry — carry rule paper P&L: open trades, closed tally, 4x return on capital\n"
     "/help — this message")
 
 HANDLERS = {
@@ -546,6 +553,7 @@ HANDLERS = {
     "/update": cmd_update,
     "/unlocks": cmd_unlocks,
     "/wake": cmd_wake,
+    "/carry": cmd_carry,
     "/help": lambda: HELP,
     "/start": lambda: HELP,
 }
@@ -565,6 +573,7 @@ MENU = [
     ("unlocks", "pre-unlock shorts: open trades + upcoming"),
     ("unlock_close", "mark an unlock short closed: /unlock_close SYM"),
     ("wake", "wake-up watch: coins followed + hit rate"),
+    ("carry", "carry rule paper P&L (open + closed, 4x ROC)"),
     ("help", "list commands"),
 ]
 

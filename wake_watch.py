@@ -44,6 +44,7 @@ this goes quiet. Highs/lows are the hourly marks the sweeps saw.
 import argparse
 import csv
 import gzip
+import itertools
 import json
 import os
 import statistics
@@ -325,6 +326,51 @@ class Watch:
             sub = [x for x in rows if x.get(k) == "1"]
             out.append(f"  {lab}: " + (tally(sub) if sub else "none closed"))
         return "\n".join(out)
+
+    def carry_report(self, now_ms=None, capital=600.0, leverage=4.0, cost=0.0022):
+        """/carry: the paper strategy's P&L -- open trades, closed tally, the 4x return on capital,
+        each tag, and the last few exits. `cost` = fees 0.08% + funding ~0.14% per trade (backtest)."""
+        now_ms = now_ms or time.time() * 1000
+        st = self.load_state()
+        open_, rows = st["carry"], self.carry_results()
+        margin = 100 / leverage
+        lines = ["<b>Carry rule</b> (paper) — old spiker, flat 6h, not falling 24h, 3d funding +13-30%/yr\n"
+                 f"$100 each · TP +100% / SL −25% / 72h · {leverage:.0f}x = ${margin:.0f} margin, ${capital:,.0f} capital"]
+        unreal = sum(100 * (x["last"] / x["entry"] - 1) for x in open_.values())
+        lines.append(f"\n<b>Open: {len(open_)}</b> · unrealised ${unreal:+,.0f}")
+        for s, x in sorted(open_.items(), key=lambda kv: kv[1]["ts"]):
+            tg_ = "".join(f" · {k}" for k, v in carry_tags(x).items() if v)
+            lines.append(f"• {s.replace('USDT', '')}: {(now_ms - x['ts']) / HOUR_MS:.0f}h, {x['last'] / x['entry'] - 1:+.1%} "
+                         f"(max {x['hi'] / x['entry'] - 1:+.0%}, min {x['lo'] / x['entry'] - 1:+.0%}){tg_}")
+        if not rows:
+            lines.append("\n<b>Closed: none yet</b> — first exits within 72h of the first trades")
+            return "\n".join(lines)
+        r = [float(x["ret"]) for x in rows]
+        gross, net = 100 * sum(r), 100 * sum(r) - 100 * cost * len(r)
+        # most positions ever open at once, for the margin actually needed
+        ev = sorted([(int(x["signal_ms"]), 1) for x in rows] + [(int(x["exit_ms"]), -1) for x in rows]
+                    + [(int(x["ts"]), 1) for x in open_.values()])
+        peak = max(itertools.accumulate(d for _, d in ev))
+        first = min(int(x["signal_ms"]) for x in rows)
+        days = max((now_ms - first) / 86_400_000, 1)
+        lines += [f"\n<b>Closed: {len(r)}</b> since {time.strftime('%d %b', time.gmtime(first / 1000))} "
+                  f"({days:.0f}d) · win rate {sum(v > 0 for v in r) / len(r):.0%}",
+                  f"P&L ${gross:+,.0f} gross · <b>${net:+,.0f} net</b> (≈{cost:.2%}/trade fees+funding)",
+                  f"per trade: mean {statistics.mean(r):+.1%}, median {statistics.median(r):+.1%} · "
+                  f"+100%: {sum(x['reason'] == 'tp' for x in rows)}, stopped: {sum(x['reason'] == 'sl' for x in rows)}, "
+                  f"72h exit: {sum(x['reason'] == 'time' for x in rows)}",
+                  f"{leverage:.0f}x on ${capital:,.0f}: net {net / capital:+.0%} ({net / capital * 30 / days:+.0%}/month), "
+                  f"incl. unrealised {(net + unreal) / capital:+.0%} · peak open {peak} = ${peak * margin:,.0f} margin",
+                  "<i>backtest: ≈ +2.7%/trade net, ≈ +5-10%/month on $600 at 4x; needs ~100 trades to judge</i>"]
+        for lab, k in (("funding +13-16%", "low"), ("no 30d squeeze", "nosqueeze")):
+            sub = [float(x["ret"]) for x in rows if x.get(k) == "1"]
+            lines.append(f"{lab}: " + (f"{len(sub)} closed, ${100 * sum(sub) - 100 * cost * len(sub):+,.0f} net, "
+                                       f"mean {statistics.mean(sub):+.1%}" if sub else "none closed"))
+        lines.append("\n<b>Last exits</b>")
+        for x in sorted(rows, key=lambda x: int(x["exit_ms"]))[-6:][::-1]:
+            lines.append(f"• {x['symbol'].replace('USDT', '')} {float(x['ret']):+.1%} ({x['reason']}, "
+                         f"{time.strftime('%d %b %H:%M', time.gmtime(int(x['exit_ms']) / 1000))})")
+        return "\n".join(lines)
 
     def _carry_step(self, st, now_ms, hist, marks):
         for sym, x in list(st["carry"].items()):

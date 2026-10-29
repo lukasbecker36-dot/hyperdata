@@ -158,3 +158,21 @@ def test_results_header_upgrade(tmp_path):
     ww._append_csv(p, ["a", "b", "c"], {"a": 3, "b": 4, "c": 5})
     ww._append_csv(p, ["a", "b", "c"], {"a": 6, "b": 7, "c": 8})
     assert p.read_text().splitlines() == ["a,b,c", "1,2,", "3,4,5", "6,7,8"]
+
+
+def test_carry_report(logs, tmp_path):
+    w = ww.Watch(tmp_path / "state")
+    assert "Open: 0" in w.carry_report(NOW) and "Closed: none yet" in w.carry_report(NOW)
+    w.fund_hi30 = lambda sym, now: 0.5
+    calm = dict(fund_now=0.15, fund_base=0.15, ask_now=5.0, mark_now=0.038, hours=80)
+    write_log(logs, ain_like("UPUSDT", **calm) + ain_like("FLATUSDT", **calm))
+    hist = ww.load_history(NOW)
+    w.step(NOW, hist)
+    h = {k: list(v) for k, v in hist.items()}
+    h["UPUSDT"].append({**h["UPUSDT"][-1], "ts": NOW + 5 * H, "mark": 0.080})
+    h["FLATUSDT"].append({**h["FLATUSDT"][-1], "ts": NOW + 5 * H, "mark": 0.0399})
+    w.step(NOW + 5 * H, h)
+    rep = w.carry_report(NOW + 6 * H)
+    assert "Open: 1" in rep and "FLAT: 6h, +5.0%" in rep and "low · nosqueeze" in rep
+    assert "Closed: 1" in rep and "$+100 gross" in rep and "$+100 net" in rep    # 100 - 0.22
+    assert "peak open 2 = $50 margin" in rep and "UP +100.0% (tp" in rep
