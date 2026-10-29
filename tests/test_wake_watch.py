@@ -112,6 +112,7 @@ def test_variants_tagged_and_tallied_separately(logs, tmp_path):
 
 def test_carry_rule_paper_trades(logs, tmp_path):
     w = ww.Watch(tmp_path / "state")
+    w.fund_hi30 = lambda sym, now: {"UPUSDT": 0.5, "DOWNUSDT": 2.0}.get(sym)
     calm = dict(fund_now=0.2, fund_base=0.2, ask_now=5.0, mark_now=0.038, hours=80)
     write_log(logs, ain_like("UPUSDT", **calm) + ain_like("DOWNUSDT", **calm) + ain_like("FLATUSDT", **calm)
               + ain_like("HOTUSDT", **{**calm, "fund_now": 0.5, "fund_base": 0.5})        # 50%/yr: out of band
@@ -133,6 +134,22 @@ def test_carry_rule_paper_trades(logs, tmp_path):
     assert (res["DOWNUSDT"]["reason"], float(res["DOWNUSDT"]["ret"])) == ("sl", -0.25)
     assert res["FLATUSDT"]["reason"] == "time" and float(res["FLATUSDT"]["ret"]) == pytest.approx(0.05)
     assert "3 closed: $+80 total" in w.carry_line()
+    assert (res["UPUSDT"]["nosqueeze"], res["DOWNUSDT"]["nosqueeze"], res["FLATUSDT"]["nosqueeze"]) == ("1", "0", "0")
+    assert "no 30d squeeze (backtest +2.3-4.4%): 1 closed: $+100" in w.carry_line()
+    assert "funding +13-16% (backtest +3.4-4.4%): none closed" in w.carry_line()
+
+
+def test_carry_skips_coins_falling_over_24h(logs, tmp_path):
+    w = ww.Watch(tmp_path / "state")
+    w.fund_hi30 = lambda sym, now: None
+    rows = ain_like("FALLUSDT", fund_now=0.15, fund_base=0.15, ask_now=5.0, mark_now=0.038, hours=80)
+    for r in rows:                                   # 0.040 a day ago -> 0.038 now: -5% over 24h, flat over 6h
+        if r["ts_ms"] <= NOW - 20 * H:
+            r["mark"] = 0.040
+    write_log(logs, rows + ain_like("OKUSDT", fund_now=0.15, fund_base=0.15, ask_now=5.0, mark_now=0.038, hours=80))
+    w.step(NOW, ww.load_history(NOW))
+    st = w.load_state()["carry"]
+    assert set(st) == {"OKUSDT"} and ww.carry_tags(st["OKUSDT"]) == {"low": True, "nosqueeze": False}
 
 
 def test_results_header_upgrade(tmp_path):

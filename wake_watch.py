@@ -27,7 +27,9 @@ offers just mean nobody is quoting), "carry" = 72h mean funding +13-30%/yr.
 
 CARRY RULE (silent paper trades, no Telegram per signal; tally in /wake and carry_results.csv):
 the one timing-free tilt that held up in backtests -- old spiker (+50% day in 30d, listed >= 60d),
-price within +-10% of 6h ago, 72h mean funding +13-30%/yr. Long $100, TP +100% / SL -25% / 72h.
+price within +-10% of 6h ago, not down > 3.7% over 24h, 72h mean funding +13-30%/yr.
+Long $100, TP +100% / SL -25% / 72h. Each trade is tagged "low" (72h funding +13-16%) and
+"nosqueeze" (30d peak funding < +100%/yr, one Aster API call per new trade); both are tallied.
 Binance 2023-26: +1.9%/trade (90% CI +1.0..+2.8, 1,926 signals); Aster May-Oct 26: +2.4%.
 Negative 3-day funding did the opposite (-1.0%). No hour-scale wake-up timing tell was found.
 
@@ -63,10 +65,15 @@ FLAT_MOVE = 0.05         # variant "flat": price within +-5% of 6h ago
 LIQUID_VOL = 50_000.0    # variant "liquid": Aster 24h volume >= $50k
 CARRY_LO, CARRY_HI = 0.13, 0.30   # variant / paper rule "carry": 72h mean funding in this band (%/yr as fraction)
 CARRY_TP, CARRY_SL, CARRY_HOURS = 1.0, 0.25, 72.0
+CARRY_MIN_RET24 = -0.037          # filter: not falling over the last 24h (better in all 3 backtest samples)
+CARRY_LOW_FUND = 0.16             # tag "low": 72h funding +13-16%/yr, just above the default
+CARRY_SQUEEZE = 1.0               # tag "nosqueeze": peak funding over 30d below +100%/yr
+ASTER_API = "https://fapi.asterdex.com/fapi/v1/"
 HISTORY_HOURS = 76.0     # enough for the 72h funding mean
 RESULT_COLS = ["signal_ms", "symbol", "entry", "max_24h", "min_24h", "ret_24h",
                "max_72h", "min_72h", "ret_72h", "flat", "liquid", "carry"]
-CARRY_COLS = ["signal_ms", "symbol", "entry", "fund72", "exit_ms", "ret", "reason", "max", "min"]
+CARRY_COLS = ["signal_ms", "symbol", "entry", "fund72", "exit_ms", "ret", "reason", "max", "min",
+              "ret24", "fund_hi30", "low", "nosqueeze"]
 
 
 def _num(v):
@@ -134,12 +141,14 @@ def features(rows, now_ms):
     base = between(12, 36, "fund")
     asks = between(4, 28, "ask5")
     then = [r for r in rows if r["mark"] and abs(r["ts"] - (now_ms - 6 * HOUR_MS)) <= 0.6 * HOUR_MS]
+    day = [r for r in rows if r["mark"] and abs(r["ts"] - (now_ms - 24 * HOUR_MS)) <= 0.6 * HOUR_MS]
     if len(base) < 12 or len(asks) < 12 or not recent or not then or not cur["mark"]:
         return None
     med_ask = statistics.median(asks)
     f72 = between(0, 72, "fund")
     return {
         "fund72": statistics.mean(f72) if len(f72) >= 48 else None,
+        "ret24": cur["mark"] / day[0]["mark"] - 1 if day else None,
         "fund": cur["fund"], "d_fund": statistics.mean(recent) - statistics.median(base),
         "fund_base": statistics.median(base),
         "ask_ratio": (cur["ask5"] / med_ask) if cur["ask5"] is not None and med_ask > 0 else None,
@@ -163,10 +172,39 @@ def carry_band(f):
 def carry_matches(f):
     """The backtested rule (Binance 2023-26 +1.9%/trade, Aster +2.4%, TP+100/SL-25/72h): an old spiker
     that hasn't moved in 6h while longs have paid a steady, mild +13-30%/yr for 3 days.
-    Broader than the AIN filter -- it needs none of the funding-jump / thin-offer conditions."""
+    Broader than the AIN filter -- it needs none of the funding-jump / thin-offer conditions.
+    Plus: not down more than 3.7% over 24h (the weakest third in every backtest sample)."""
     return bool(
         f and carry_band(f) and f["gain30"] is not None and f["age"] is not None
-        and abs(f["px_chg6"]) < MAX_MOVE and f["gain30"] >= PRIOR_SPIKE and f["age"] >= MIN_AGE_DAYS)
+        and abs(f["px_chg6"]) < MAX_MOVE and f["gain30"] >= PRIOR_SPIKE and f["age"] >= MIN_AGE_DAYS
+        and f.get("ret24") is not None and f["ret24"] >= CARRY_MIN_RET24)
+
+
+def fetch_fund_hi30(sym, now_ms):
+    """Peak annualised Aster funding over the last 30 days (None if unavailable)."""
+    import urllib.parse
+    import urllib.request
+    try:
+        url = (f"{ASTER_API}fundingRate?symbol={urllib.parse.quote(sym)}"
+               f"&startTime={int(now_ms - 30 * 86_400_000)}&limit=1000")
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "wake-watch"}), timeout=15) as r:
+            rows = json.load(r)
+    except Exception:
+        return None
+    pts = sorted((int(x["fundingTime"]), float(x["fundingRate"])) for x in rows)
+    if len(pts) < 10:
+        return None
+    best = None
+    for (t0, _), (t1, rate) in zip(pts, pts[1:]):
+        hours = min(8, max(1, round((t1 - t0) / HOUR_MS)))       # Aster mixes 1h/4h/8h intervals
+        ann = rate * 8760 / hours
+        best = ann if best is None else max(best, ann)
+    return best
+
+
+def carry_tags(x):
+    return {"low": x.get("fund72") is not None and x["fund72"] < CARRY_LOW_FUND,
+            "nosqueeze": x.get("fund_hi30") is not None and x["fund_hi30"] < CARRY_SQUEEZE}
 
 
 def variants(f):
@@ -217,6 +255,7 @@ class Watch:
         self.state_file = self.dir / "wake_watch.json"
         self.results_file = self.dir / "wake_watch_results.csv"
         self.carry_file = self.dir / "carry_results.csv"
+        self.fund_hi30 = fetch_fund_hi30          # swapped out in tests
 
     def load_state(self):
         try:
@@ -268,13 +307,24 @@ class Watch:
                 f"{len(open_)} open")
         if open_:
             unreal = sum(100 * (x["last"] / x["entry"] - 1) for x in open_.values())
-            head += f" (${unreal:+,.0f} unrealised)"
+            head += f" (${unreal:+,.0f} unrealised: " + ", ".join(
+                f"{s.replace('USDT', '')} {x['last'] / x['entry'] - 1:+.0%}"
+                + "".join(f" {k}" for k, v in carry_tags(x).items() if v)
+                for s, x in sorted(open_.items(), key=lambda kv: kv[1]["ts"])) + ")"
         if not rows:
             return head + ", none closed yet"
-        r = [float(x["ret"]) for x in rows]
-        return (head + f", {len(r)} closed: ${100 * sum(r):+,.0f} total, mean {statistics.mean(r):+.1%}, "
-                f"median {statistics.median(r):+.1%}, {sum(x['reason'] == 'tp' for x in rows)} hit +100%, "
-                f"{sum(x['reason'] == 'sl' for x in rows)} stopped (before costs)")
+
+        def tally(rs):
+            r = [float(x["ret"]) for x in rs]
+            return (f"{len(r)} closed: ${100 * sum(r):+,.0f} total, mean {statistics.mean(r):+.1%}, "
+                    f"median {statistics.median(r):+.1%}, {sum(x['reason'] == 'tp' for x in rs)} hit +100%, "
+                    f"{sum(x['reason'] == 'sl' for x in rs)} stopped")
+        out = [head + ", " + tally(rows) + " (before costs)"]
+        for lab, k in (("funding +13-16% (backtest +3.4-4.4%)", "low"),
+                       ("no 30d squeeze (backtest +2.3-4.4%)", "nosqueeze")):
+            sub = [x for x in rows if x.get(k) == "1"]
+            out.append(f"  {lab}: " + (tally(sub) if sub else "none closed"))
+        return "\n".join(out)
 
     def _carry_step(self, st, now_ms, hist, marks):
         for sym, x in list(st["carry"].items()):
@@ -292,7 +342,10 @@ class Watch:
                 _append_csv(self.carry_file, CARRY_COLS, {
                     "signal_ms": int(x["ts"]), "symbol": sym, "entry": f"{x['entry']:.6g}", "fund72": f"{x['fund72']:.4g}",
                     "exit_ms": int(now_ms), "ret": f"{ret:.6g}", "reason": reason,
-                    "max": f"{x['hi'] / x['entry'] - 1:.6g}", "min": f"{x['lo'] / x['entry'] - 1:.6g}"})
+                    "max": f"{x['hi'] / x['entry'] - 1:.6g}", "min": f"{x['lo'] / x['entry'] - 1:.6g}",
+                    "ret24": "" if x.get("ret24") is None else f"{x['ret24']:.4g}",
+                    "fund_hi30": "" if x.get("fund_hi30") is None else f"{x['fund_hi30']:.4g}",
+                    **{k: int(v) for k, v in carry_tags(x).items()}})
                 del st["carry"][sym]
         for sym, rows in hist.items():
             if sym in st["carry"]:
@@ -300,7 +353,8 @@ class Watch:
             f = features(rows, now_ms)
             if carry_matches(f):
                 st["carry"][sym] = {"ts": now_ms, "entry": f["mark"], "hi": f["mark"], "lo": f["mark"],
-                                    "last": f["mark"], "fund72": f["fund72"]}
+                                    "last": f["mark"], "fund72": f["fund72"], "ret24": f["ret24"],
+                                    "fund_hi30": self.fund_hi30(sym, now_ms)}
 
     def step(self, now_ms, hist=None):
         """Process the sweep at now_ms: follow-ups for watched coins, then new matches.
