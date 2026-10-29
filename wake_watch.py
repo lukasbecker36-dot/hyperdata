@@ -20,6 +20,11 @@ so it proves nothing yet. This collects the out-of-sample cases: each match is a
 once (re-arm 72h), reported at 24h and 72h, and appended to wake_watch_results.csv;
 the 72h report and /wake carry the running hit rate.
 
+Two tighter variants are tagged on every alert and tallied separately (tags only, so they
+are scored on the same cases): "flat" = price within +-5% of 6h ago (the first live alerts
+often fired after a small run-up), "liquid" = Aster 24h volume >= $50k (on near-dead books
+thin MEXC offers just mean nobody is quoting).
+
 DATA: the basis-trade engine's hourly scam-screen logs (SCAM_LOG_DIR, default
 /opt/basis-trade/output/scam_log_YYYYMMDD.csv[.gz]) -- funding, MEXC depth bands, marks,
 30d best day and listing age for every Aster coin perp. Read-only; if that engine stops,
@@ -48,8 +53,10 @@ MAX_MOVE = 0.10          # price within +-10% of 6h ago
 PRIOR_SPIKE = 0.50       # a +50% day in the last 30 days
 MIN_AGE_DAYS = 60.0
 REARM_HOURS = 72.0
+FLAT_MOVE = 0.05         # variant "flat": price within +-5% of 6h ago
+LIQUID_VOL = 50_000.0    # variant "liquid": Aster 24h volume >= $50k
 RESULT_COLS = ["signal_ms", "symbol", "entry", "max_24h", "min_24h", "ret_24h",
-               "max_72h", "min_72h", "ret_72h"]
+               "max_72h", "min_72h", "ret_72h", "flat", "liquid"]
 
 
 def _num(v):
@@ -80,7 +87,8 @@ def load_history(now_ms, hours=40.0, log_dir=None):
                     hist.setdefault(r["symbol"], []).append({
                         "ts": ts, "mark": _num(r.get("mark")), "fund": _num(r.get("funding_apr")),
                         "ask5": _num(r.get("mexc_ask_5pct")), "gain30": _num(r.get("max_day_gain_30d")),
-                        "age": _num(r.get("age_days")), "score": _num(r.get("score"))})
+                        "age": _num(r.get("age_days")), "score": _num(r.get("score")),
+                        "vol": _num(r.get("perp_volume_usd"))})
     for rows in hist.values():
         rows.sort(key=lambda x: x["ts"])
     return hist
@@ -124,7 +132,7 @@ def features(rows, now_ms):
         "fund_base": statistics.median(base),
         "ask_ratio": (cur["ask5"] / med_ask) if cur["ask5"] is not None and med_ask > 0 else None,
         "px_chg6": cur["mark"] / then[0]["mark"] - 1, "gain30": cur["gain30"], "age": cur["age"],
-        "mark": cur["mark"], "score": cur["score"]}
+        "mark": cur["mark"], "score": cur["score"], "vol": cur.get("vol")}
 
 
 def matches(f):
@@ -134,6 +142,25 @@ def matches(f):
         and f["fund"] > FUND_MIN and f["d_fund"] >= FUND_RISE
         and f["ask_ratio"] <= ASK_RATIO and abs(f["px_chg6"]) < MAX_MOVE
         and f["gain30"] >= PRIOR_SPIKE and f["age"] >= MIN_AGE_DAYS)
+
+
+def variants(f):
+    """Which tighter variants this alert also passes."""
+    return {"flat": abs(f["px_chg6"]) < FLAT_MOVE,
+            "liquid": f.get("vol") is not None and f["vol"] >= LIQUID_VOL}
+
+
+def tags(x):
+    return " · ".join(f"{k} {'✓' if x.get(k) else '✗'}" for k in ("flat", "liquid"))
+
+
+def _tally(rows):
+    mx = [float(r["max_72h"]) for r in rows]
+    r72 = [float(r["ret_72h"]) for r in rows]
+    r24 = [float(r["ret_24h"]) for r in rows]
+    return (f"{len(rows)} completed: {sum(m >= 0.3 for m in mx)} reached +30%, {sum(m >= 1.0 for m in mx)} "
+            f"reached +100% within 72h; median 72h {statistics.median(r72):+.0%}. $100 each, "
+            f"held 24h: ${100 * sum(r24):+,.0f}, held 72h: ${100 * sum(r72):+,.0f} (before costs)")
 
 
 class Watch:
@@ -169,12 +196,12 @@ class Watch:
         rows = self.results()
         if not rows:
             return "no completed watches yet"
-        mx = [float(r["max_72h"]) for r in rows]
-        r72 = [float(r["ret_72h"]) for r in rows]
-        r24 = [float(r["ret_24h"]) for r in rows]
-        return (f"{len(rows)} completed: {sum(m >= 0.3 for m in mx)} reached +30%, {sum(m >= 1.0 for m in mx)} "
-                f"reached +100% within 72h; median 72h {statistics.median(r72):+.0%}. $100 each, "
-                f"held 24h: ${100 * sum(r24):+,.0f}, held 72h: ${100 * sum(r72):+,.0f} (before costs)")
+        out = [_tally(rows)]
+        for lab, keep in (("flat (±5%/6h)", ("flat",)), ("liquid (≥$50k/day)", ("liquid",)),
+                          ("flat+liquid", ("flat", "liquid"))):
+            sub = [r for r in rows if all(r.get(k) == "1" for k in keep)]
+            out.append(f"{lab}: " + (_tally(sub) if sub else "none completed"))
+        return "\n".join(out)
 
     def step(self, now_ms, hist=None):
         """Process the sweep at now_ms: follow-ups for watched coins, then new matches.
@@ -199,7 +226,8 @@ class Watch:
                        "min_24h": w.get("lo24", w["lo"] / w["entry"] - 1),
                        "ret_24h": w.get("r24", w["last"] / w["entry"] - 1),
                        "max_72h": w["hi"] / w["entry"] - 1, "min_72h": w["lo"] / w["entry"] - 1,
-                       "ret_72h": w["last"] / w["entry"] - 1}
+                       "ret_72h": w["last"] / w["entry"] - 1,
+                       "flat": int(bool(w.get("flat"))), "liquid": int(bool(w.get("liquid")))}
                 new = not self.results_file.exists()
                 with open(self.results_file, "a", newline="") as f:
                     wr = csv.DictWriter(f, fieldnames=RESULT_COLS)
@@ -216,14 +244,16 @@ class Watch:
             if not matches(f):
                 continue
             st["last_alert"][sym] = now_ms
-            st["active"][sym] = {"ts": now_ms, "entry": f["mark"], "hi": f["mark"], "lo": f["mark"], "last": f["mark"]}
+            st["active"][sym] = {"ts": now_ms, "entry": f["mark"], "hi": f["mark"], "lo": f["mark"], "last": f["mark"],
+                                 **variants(f)}
             msgs.append(
                 f"👀 <b>wake-up watch: {sym}</b> @ {f['mark']:.6g} — looks like AIN before its run\n"
                 f"  funding {f['fund']:+.0%}/yr, up {f['d_fund']:+.0%} on its baseline {f['fund_base']:+.0%}\n"
                 f"  MEXC offers within 5% at {f['ask_ratio']:.0%} of normal · price {f['px_chg6']:+.0%} over 6h\n"
                 f"  +{f['gain30']:.0%} day in the last 30d · listed {f['age']:.0f}d · scam score {f['score']:.0f}\n"
+                f"  Aster vol ${f.get('vol') or 0:,.0f}/24h · variants: {tags(st['active'][sym])}\n"
                 f"  <i>WATCH ONLY: of the first 4 such cases 1 ran (AIN), 1 rose 21%, 2 went nowhere. "
-                f"Reports at 24h and 72h. {self.stats_line()}</i>")
+                f"Reports at 24h and 72h.</i>\n{self.stats_line()}")
         st["last_sweep"] = now_ms
         self.save_state(st)
         return msgs

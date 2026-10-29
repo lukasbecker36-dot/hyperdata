@@ -9,15 +9,16 @@ import wake_watch as ww
 
 H = ww.HOUR_MS
 NOW = 1_793_000_000_000 - (1_793_000_000_000 % H)
-COLS = ["ts_ms", "symbol", "mark", "funding_apr", "mexc_ask_5pct", "max_day_gain_30d", "age_days", "score"]
+COLS = ["ts_ms", "symbol", "mark", "funding_apr", "mexc_ask_5pct", "max_day_gain_30d", "age_days", "score",
+        "perp_volume_usd"]
 
 
-def ain_like(sym="AINUSDT", fund_now=0.6, ask_now=3.0, mark_now=0.040, gain=1.5, age=120, end=NOW):
+def ain_like(sym="AINUSDT", fund_now=0.6, ask_now=3.0, mark_now=0.040, gain=1.5, age=120, vol=200_000, end=NOW):
     rows = []
     for i in range(40, -1, -1):
         rows.append({"ts_ms": end - i * H, "symbol": sym, "mark": mark_now if i == 0 else 0.038,
                      "funding_apr": fund_now if i <= 3 else 0.11, "mexc_ask_5pct": ask_now * 1000 if i == 0 else 5000,
-                     "max_day_gain_30d": gain, "age_days": age, "score": 5})
+                     "max_day_gain_30d": gain, "age_days": age, "score": 5, "perp_volume_usd": vol})
     return rows
 
 
@@ -85,3 +86,24 @@ def test_rearm_window(logs, tmp_path):
     st["active"].clear()
     w.save_state(st)
     assert w.step(NOW + 2 * H, hist) == []
+
+
+def test_variants_tagged_and_tallied_separately(logs, tmp_path):
+    w = ww.Watch(tmp_path / "state")
+    # +2.6% over 6h is "flat", +5.3% is not; $20k volume fails "liquid"; the base rule takes all three
+    write_log(logs, ain_like(mark_now=0.039) + ain_like("RUNUPUSDT") + ain_like("DEADUSDT", mark_now=0.039, vol=20_000))
+    hist = ww.load_history(NOW)
+    msgs = w.step(NOW, hist)
+    assert len(msgs) == 3
+    act = w.load_state()["active"]
+    assert (act["AINUSDT"]["flat"], act["AINUSDT"]["liquid"]) == (True, True)
+    assert (act["RUNUPUSDT"]["flat"], act["RUNUPUSDT"]["liquid"]) == (False, True)
+    assert (act["DEADUSDT"]["flat"], act["DEADUSDT"]["liquid"]) == (True, False)
+    for s in act:
+        hist[s].append({**hist[s][-1], "ts": NOW + 72 * H, "mark": 0.076 if s == "AINUSDT" else 0.038})
+    w.step(NOW + 72 * H, hist)
+    out = w.stats_line()
+    assert out.splitlines()[0].startswith("3 completed: 1 reached +30%")
+    assert "flat (±5%/6h): 2 completed: 1 reached +30%" in out
+    assert "liquid (≥$50k/day): 2 completed: 1 reached +30%" in out
+    assert "flat+liquid: 1 completed: 1 reached +30%, 0 reached +100%" in out

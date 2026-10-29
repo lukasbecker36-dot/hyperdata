@@ -482,7 +482,8 @@ def cmd_wake():
     lines = ["<b>Wake-up watch</b> — old spikers: funding climbing, MEXC offers thinning, price flat"]
     for sym, x in sorted(st["active"].items(), key=lambda kv: kv[1]["ts"]):
         lines.append(f"• {sym}: {(now - x['ts']) / 3_600_000:.0f}h in, {x['entry']:.6g} → {x['last']:.6g} "
-                     f"({x['last'] / x['entry'] - 1:+.0%}, max {x['hi'] / x['entry'] - 1:+.0%})")
+                     f"({x['last'] / x['entry'] - 1:+.0%}, max {x['hi'] / x['entry'] - 1:+.0%}) "
+                     f"[{wake_watch.tags(x)}]")
     if not st["active"]:
         lines.append("nothing being watched right now")
     if st.get("last_sweep"):
