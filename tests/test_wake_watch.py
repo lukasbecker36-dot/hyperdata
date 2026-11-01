@@ -241,3 +241,15 @@ def test_fund50_daily_lots_stop_time_and_funding(logs, tmp_path):
     assert float(hot[0]["funding"]) == pytest.approx(0.6 * 168 / 8760, rel=1e-4)
     rep = w.fund50_report(NOW + 169 * H)
     assert "Closed: 2" in rep and "stopped 1" in rep and "HOT: " in rep and "≥ +50%/yr" in rep
+
+
+def test_in_sample_alert_left_out_of_the_tally(tmp_path):
+    w = ww.Watch(tmp_path / "state")
+    row = dict(entry=0.15, max_24h=0.02, min_24h=-0.07, ret_24h=-0.06, max_72h=0.84, min_72h=-0.07, ret_72h=0.58,
+               flat=1, liquid=1, carry=0)
+    ww._append_csv(w.results_file, ww.RESULT_COLS, {**row, "signal_ms": 1793234285572, "symbol": "AINUSDT"})
+    assert w.stats_line().startswith("no completed watches yet (excl. 1 in-sample")
+    ww._append_csv(w.results_file, ww.RESULT_COLS, {**row, "signal_ms": 1793400000000, "symbol": "AINUSDT"})
+    out = w.stats_line()
+    assert out.startswith("1 completed: 1 reached +30%") and "excl. 1 in-sample" in out
+    assert len(w.results()) == 2                                       # still on file

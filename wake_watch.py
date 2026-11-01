@@ -73,6 +73,8 @@ MAX_MOVE = 0.10          # price within +-10% of 6h ago
 PRIOR_SPIKE = 0.50       # a +50% day in the last 30 days
 MIN_AGE_DAYS = 60.0
 REARM_HOURS = 72.0
+# Alerts the filter was drawn from: kept in wake_watch_results.csv but left out of the tally.
+IN_SAMPLE = {("AINUSDT", 1793234285572)}     # AIN 26 Oct 2026, the run the filter was built on
 FLAT_MOVE = 0.05         # variant "flat": price within +-5% of 6h ago
 LIQUID_VOL = 50_000.0    # variant "liquid": Aster 24h volume >= $50k
 CARRY_LO, CARRY_HI = 0.13, 0.30   # variant / paper rule "carry": 72h mean funding in this band (%/yr as fraction)
@@ -328,10 +330,13 @@ class Watch:
             return []
 
     def stats_line(self):
-        rows = self.results()
+        allrows = self.results()
+        rows = [r for r in allrows if (r["symbol"], int(r["signal_ms"])) not in IN_SAMPLE]
+        note = (f" (excl. {len(allrows) - len(rows)} in-sample: the AIN 26 Oct run the filter was built on)"
+                if len(rows) < len(allrows) else "")
         if not rows:
-            return "no completed watches yet"
-        out = [_tally(rows)]
+            return "no completed watches yet" + note
+        out = [_tally(rows) + note]
         for lab, keep in (("flat (±5%/6h)", ("flat",)), ("liquid (≥$50k/day)", ("liquid",)),
                           ("flat+liquid", ("flat", "liquid")), ("carry (3d funding +13-30%)", ("carry",))):
             sub = [r for r in rows if all(r.get(k) == "1" for k in keep)]
