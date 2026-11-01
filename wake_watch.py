@@ -345,32 +345,19 @@ class Watch:
         except FileNotFoundError:
             return []
 
-    def carry_line(self, st=None):
-        """Running tally of the silent paper rule."""
+    def books_line(self, st=None):
+        """One line per paper book for /wake; the detail lives in /carry and /fund."""
         st = st or self.load_state()
-        rows = self.carry_results()
-        open_ = st["carry"]
-        head = (f"carry rule (paper, $100 each, TP +100% / SL −25% / 72h; backtest ≈ +1.5%/trade net): "
-                f"{len(open_)} open")
-        if open_:
-            unreal = sum(100 * (x["last"] / x["entry"] - 1) for x in open_.values())
-            head += f" (${unreal:+,.0f} unrealised: " + ", ".join(
-                f"{s.replace('USDT', '')} {x['last'] / x['entry'] - 1:+.0%}"
-                + "".join(f" {k}" for k, v in carry_tags(x).items() if v)
-                for s, x in sorted(open_.items(), key=lambda kv: kv[1]["ts"])) + ")"
-        if not rows:
-            return head + ", none closed yet"
-
-        def tally(rs):
-            r = [float(x["ret"]) for x in rs]
-            return (f"{len(r)} closed: ${100 * sum(r):+,.0f} total, mean {statistics.mean(r):+.1%}, "
-                    f"median {statistics.median(r):+.1%}, {sum(x['reason'] == 'tp' for x in rs)} hit +100%, "
-                    f"{sum(x['reason'] == 'sl' for x in rs)} stopped")
-        out = [head + ", " + tally(rows) + " (before costs)"]
-        for lab, k in (("funding +13-16% (backtest +3.4-4.4%)", "low"),
-                       ("no 30d squeeze (backtest +2.3-4.4%)", "nosqueeze")):
-            sub = [x for x in rows if x.get(k) == "1"]
-            out.append(f"  {lab}: " + (tally(sub) if sub else "none closed"))
+        out = ["<b>Paper books</b> (details: /carry, /fund)"]
+        for book, lab in (("carry", "carry 3d"), ("carry14", "carry 14d")):
+            rows = self.carry_results(book)
+            closed = (f"{len(rows)} closed ${100 * sum(float(x['ret']) for x in rows):+,.0f} before costs"
+                      if rows else "none closed")
+            out.append(f"• {lab}: {len(st[book])} open, {closed}")
+        rows = self.fund50_results()
+        net = sum(float(x["ret"]) - float(x["funding"]) - FUND50_COST for x in rows)
+        out.append(f"• fund: {len(st['fund50'])} lots open, "
+                   + (f"{len(rows)} closed ${100 * net:+,.0f} net" if rows else "none closed"))
         return "\n".join(out)
 
     def carry_report(self, now_ms=None, capital=600.0, book="carry"):

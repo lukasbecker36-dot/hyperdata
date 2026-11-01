@@ -133,10 +133,11 @@ def test_carry_rule_paper_trades(logs, tmp_path):
     assert (res["UPUSDT"]["reason"], float(res["UPUSDT"]["ret"])) == ("tp", 1.0)
     assert (res["DOWNUSDT"]["reason"], float(res["DOWNUSDT"]["ret"])) == ("sl", -0.25)
     assert res["FLATUSDT"]["reason"] == "time" and float(res["FLATUSDT"]["ret"]) == pytest.approx(0.05)
-    assert "3 closed: $+80 total" in w.carry_line()
+    assert "• carry 3d: 0 open, 3 closed $+80 before costs" in w.books_line()
+    assert "• carry 14d: 2 open, 1 closed $+100" in w.books_line() and "• fund: 0 lots open, none closed" in w.books_line()
     assert (res["UPUSDT"]["nosqueeze"], res["DOWNUSDT"]["nosqueeze"], res["FLATUSDT"]["nosqueeze"]) == ("1", "0", "0")
-    assert "no 30d squeeze (backtest +2.3-4.4%): 1 closed: $+100" in w.carry_line()
-    assert "funding +13-16% (backtest +3.4-4.4%): none closed" in w.carry_line()
+    rep = w.carry_report(NOW + 73 * H)
+    assert "no 30d squeeze: 1 closed, $+100 net" in rep and "funding +13-16%: none closed" in rep
 
 
 def test_carry_skips_coins_falling_over_24h(logs, tmp_path):
