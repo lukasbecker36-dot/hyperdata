@@ -1,0 +1,14 @@
+# /etc/sudoers.d/hyper-botctl -- lets the Telegram monitor (user hyper) restart the units /update restarts.
+# One line per unit in RESTART_UNITS (deploy/telegram-monitor.service), plus the monitor itself.
+# live-bot-15m-ats is deliberately absent: restart the live arm by hand, when it is flat.
+# Install: install -m 0440 deploy/hyper-botctl.sudoers /etc/sudoers.d/hyper-botctl && visudo -c
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart paper-bot-5m
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart paper-bot-15m
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart paper-bot-15m-mid
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart paper-bot-15m-boll
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart paper-bot-15m-boll-mid
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart paper-bot-15m-ats
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart wake-watch
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart wick-shadow
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart weekend-gap
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart telegram-monitor

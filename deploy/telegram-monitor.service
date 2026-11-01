@@ -15,7 +15,9 @@ Environment=REPO_DIR=/opt/hyperdata
 # NOTE: live-bot-15m-ats is deliberately NOT in RESTART_UNITS. /update would restart it
 # mid-position, and a restart costs ~2.5min of recalibration during which open real
 # positions get no exit check. Restart the live arm by hand, when it is flat.
-Environment=RESTART_UNITS=paper-bot-5m paper-bot-15m paper-bot-15m-mid paper-bot-15m-boll paper-bot-15m-boll-mid paper-bot-15m-ats
+# Every unit listed here also needs a line in /etc/sudoers.d/hyper-botctl (deploy/hyper-botctl.sudoers),
+# or its restart fails with a red cross in the /update reply.
+Environment=RESTART_UNITS=paper-bot-5m paper-bot-15m paper-bot-15m-mid paper-bot-15m-boll paper-bot-15m-boll-mid paper-bot-15m-ats wake-watch wick-shadow weekend-gap
 Environment=SYSTEMCTL=/usr/bin/systemctl
 ExecStart=/usr/bin/python3 /opt/hyperdata/telegram_monitor.py
 Restart=always

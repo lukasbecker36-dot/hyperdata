@@ -154,6 +154,26 @@ systemctl restart telegram-monitor     # picks up /gap
 tail -f /opt/hyperdata/gap/service.out
 ```
 
+### Restarts from Telegram (/update)
+
+`/update` pulls the repo and restarts every unit in `RESTART_UNITS` (set in
+`deploy/telegram-monitor.service`) with `sudo -n systemctl restart <unit>`, so each unit there
+also needs a rule in `/etc/sudoers.d/hyper-botctl`. A unit missing from either is not restarted
+and keeps running the old code (the reply shows ❌ for a missing sudoers rule). The live arm
+(`live-bot-15m-ats`) is deliberately in neither: restart it by hand, when it is flat.
+
+```bash
+# as root, after adding a service or changing either file
+install -m 0440 deploy/hyper-botctl.sudoers /etc/sudoers.d/hyper-botctl
+visudo -c                                # must say "parsed OK"
+cp deploy/telegram-monitor.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl restart telegram-monitor
+```
+
+Drop a unit's line from both files if that service isn't installed (e.g. `weekend-gap`), or
+`/update` shows a ❌ for it.
+
 ## 4. Watch it
 
 ```bash
