@@ -500,6 +500,12 @@ def cmd_carry():
     return w.carry_report() + "\n\n" + w.carry_report(book="carry14")
 
 
+def cmd_fund():
+    """Funding-momentum paper book: long coins with 3d funding >= +50%/yr (opened/closed silently by wake_watch.py)."""
+    import wake_watch
+    return wake_watch.Watch(WAKE_DIR).fund50_report()
+
+
 # ---- wick shadow (wick_shadow.py, its own service) ------------------------------------
 WICK_DIR = os.environ.get("WICK_DATADIR", "/opt/hyperdata/wick")
 
@@ -560,6 +566,7 @@ HELP = (
     "/unlock_close SYM — I've closed SYM · /unlock_skip SYM — not trading it\n"
     "/wake — wake-up watch: old spikers waking up (AIN pattern), followed 72h, hit rate so far\n"
     "/carry — carry rule paper P&L, 72h and 14-day books: open trades, closed tally, return on capital\n"
+    "/fund — funding momentum paper book: long coins with 3d funding ≥ +50%/yr, 7d hold\n"
     "/wick — wick shadow: paper fills of the micro-wick fade, feed lag, request budget\n"
     "/gap — weekend gap: HL xyz vs Aster price gap on the same stock/commodity perps, by session\n"
     "/help — this message")
@@ -577,6 +584,7 @@ HANDLERS = {
     "/unlocks": cmd_unlocks,
     "/wake": cmd_wake,
     "/carry": cmd_carry,
+    "/fund": cmd_fund,
     "/wick": cmd_wick,
     "/gap": cmd_gap,
     "/help": lambda: HELP,
@@ -599,6 +607,7 @@ MENU = [
     ("unlock_close", "mark an unlock short closed: /unlock_close SYM"),
     ("wake", "wake-up watch: coins followed + hit rate"),
     ("carry", "carry rule paper P&L, 72h + 14d books"),
+    ("fund", "funding momentum paper book (3d funding ≥ +50%)"),
     ("wick", "wick shadow: micro-wick fade paper P&L + lag"),
     ("gap", "weekend gap: HL xyz vs Aster, same perps"),
     ("help", "list commands"),

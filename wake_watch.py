@@ -36,6 +36,14 @@ A second book, "carry14", takes the same entries with a 14-day hold, SL -50%, TP
 1% stop slippage, fees and funding: Binance 2023-26 +4.8%/trade, Aster +6.3%; the -50% stop leaves
 room for only ~1.5x leverage). Tallied in /carry and carry14_results.csv.
 
+FUNDING-MOMENTUM BOOK "fund50" (silent paper lots, /fund and fund50_results.csv): long any Aster coin perp
+whose 72h mean funding is >= +50%/yr (longs crowding in and paying up), listed >= 60d, Aster 24h volume
+>= $1M. A $100 lot per coin per day while it qualifies (so a coin that keeps qualifying builds up), each
+held 7 days, stop -40%, no take-profit. Funding paid is accrued every sweep. Binance 2022-26 incl. 347
+delisted perps: +56-59%/yr on capital, Sharpe 0.9, worst drawdown -57%; per lot +0.9% mean but -3.8%
+median, 40% win -- a few long runners pay for many small losers, which is why take-profits (+25..100%)
+and stops tighter than -30% each cut the return by half or more. Almost all of it came in 2024-26.
+
 DATA: the basis-trade engine's hourly scam-screen logs (SCAM_LOG_DIR, default
 /opt/basis-trade/output/scam_log_YYYYMMDD.csv[.gz]) -- funding, MEXC depth bands, marks,
 30d best day and listing age for every Aster coin perp. Read-only; if that engine stops,
@@ -81,12 +89,19 @@ CARRY_BOOKS = {
 CARRY_MIN_RET24 = -0.037          # filter: not falling over the last 24h (better in all 3 backtest samples)
 CARRY_LOW_FUND = 0.16             # tag "low": 72h funding +13-16%/yr, just above the default
 CARRY_SQUEEZE = 1.0               # tag "nosqueeze": peak funding over 30d below +100%/yr
+FUND50_MIN = 0.50                 # fund50 book: 72h mean funding >= +50%/yr
+FUND50_MIN_VOL = 1_000_000.0      # Aster 24h volume
+FUND50_HOURS, FUND50_SL = 168.0, 0.40
+FUND50_REBUY_HOURS = 24.0         # one new lot per coin per day while it qualifies
+FUND50_STALE_HOURS = 48.0         # no mark for this long (delisted / dropped from the sweep): close at the last mark
+FUND50_COST = 0.002               # fees, 0.1% a side (backtest assumption)
 ASTER_API = "https://fapi.asterdex.com/fapi/v1/"
 HISTORY_HOURS = 76.0     # enough for the 72h funding mean
 RESULT_COLS = ["signal_ms", "symbol", "entry", "max_24h", "min_24h", "ret_24h",
                "max_72h", "min_72h", "ret_72h", "flat", "liquid", "carry"]
 CARRY_COLS = ["signal_ms", "symbol", "entry", "fund72", "exit_ms", "ret", "reason", "max", "min",
               "ret24", "fund_hi30", "low", "nosqueeze"]
+FUND50_COLS = ["signal_ms", "symbol", "entry", "fund72", "vol", "exit_ms", "ret", "funding", "reason", "max", "min"]
 
 
 def _num(v):
@@ -193,6 +208,22 @@ def carry_matches(f):
         and f.get("ret24") is not None and f["ret24"] >= CARRY_MIN_RET24)
 
 
+def fund50_features(rows, now_ms):
+    """72h mean funding and the latest mark/age/volume -- no MEXC depth needed (unlike features())."""
+    if not rows or now_ms - rows[-1]["ts"] > 2 * HOUR_MS or not rows[-1]["mark"]:
+        return None
+    f72 = [r["fund"] for r in rows if r["fund"] is not None and r["ts"] >= now_ms - 72 * HOUR_MS]
+    cur = rows[-1]
+    return {"fund72": statistics.mean(f72) if len(f72) >= 48 else None, "fund": cur["fund"],
+            "mark": cur["mark"], "age": cur["age"], "vol": cur["vol"]}
+
+
+def fund50_matches(f):
+    return bool(f and f["fund72"] is not None and f["fund72"] >= FUND50_MIN
+                and f["age"] is not None and f["age"] >= MIN_AGE_DAYS
+                and f["vol"] is not None and f["vol"] >= FUND50_MIN_VOL)
+
+
 def fetch_fund_hi30(sym, now_ms):
     """Peak annualised Aster funding over the last 30 days (None if unavailable)."""
     import urllib.parse
@@ -280,6 +311,8 @@ class Watch:
         st.setdefault("last_sweep", 0)
         for book in CARRY_BOOKS:
             st.setdefault(book, {})
+        st.setdefault("fund50", {})          # lot id "SYM|signal_ms" -> lot
+        st.setdefault("fund50_last", {})     # symbol -> last lot opened
         return st
 
     def save_state(self, st):
@@ -419,6 +452,83 @@ class Watch:
                                  "last": f["mark"], "fund72": f["fund72"], "ret24": f["ret24"],
                                  "fund_hi30": self._hi30(sym, now_ms)}
 
+    def fund50_results(self):
+        try:
+            with open(self.dir / "fund50_results.csv", newline="") as f:
+                return list(csv.DictReader(f))
+        except FileNotFoundError:
+            return []
+
+    def fund50_report(self, now_ms=None):
+        """/fund: the funding-momentum paper book -- open lots by coin, closed tally net of funding and fees."""
+        now_ms = now_ms or time.time() * 1000
+        st, rows = self.load_state(), self.fund50_results()
+        lots = st["fund50"]
+        lines = ["<b>Funding momentum</b> (paper) — long Aster coins with 3d funding ≥ +50%/yr, listed ≥ 60d, "
+                 f"≥ $1M/day\n$100 lot per coin per day while it qualifies · hold 7d · stop −40% · no take-profit"]
+        unreal = sum(100 * (x["last"] / x["entry"] - 1 - x["funding"]) for x in lots.values())
+        lines.append(f"\n<b>Open: {len(lots)} lots</b> · unrealised ${unreal:+,.0f} (after funding)")
+        by = {}
+        for x in lots.values():
+            by.setdefault(x["symbol"], []).append(x)
+        for sym, xs in sorted(by.items(), key=lambda kv: -len(kv[1])):
+            r = [x["last"] / x["entry"] - 1 for x in xs]
+            lines.append(f"• {sym.replace('USDT', '')}: {len(xs)} lot{'s' if len(xs) > 1 else ''}, "
+                         f"{statistics.mean(r):+.1%} avg, oldest {(now_ms - min(x['ts'] for x in xs)) / HOUR_MS / 24:.1f}d, "
+                         f"3d funding {xs[-1]['fund72']:+.0%}/yr")
+        if not rows:
+            lines.append("\n<b>Closed: none yet</b> — first exits 7 days after the first lots")
+            return "\n".join(lines)
+        ret = [float(x["ret"]) for x in rows]
+        net = [float(x["ret"]) - float(x["funding"]) - FUND50_COST for x in rows]
+        first = min(int(x["signal_ms"]) for x in rows)
+        lines += [f"\n<b>Closed: {len(rows)}</b> since {time.strftime('%d %b', time.gmtime(first / 1000))} · "
+                  f"win {sum(v > 0 for v in net) / len(net):.0%} · stopped {sum(x['reason'] == 'sl' for x in rows)}",
+                  f"per lot (net of funding + 0.2% fees): mean {statistics.mean(net):+.1%}, "
+                  f"median {statistics.median(net):+.1%}, best {max(net):+.0%}, worst {min(net):+.0%}",
+                  f"P&L <b>${100 * sum(net):+,.0f} net</b> (price ${100 * sum(ret):+,.0f}, "
+                  f"funding ${-100 * sum(float(x['funding']) for x in rows):+,.0f})",
+                  "<i>backtest per lot: mean +0.9%, median −3.8%, 40% win — judge on the mean after a few hundred lots</i>",
+                  "\n<b>Last exits</b>"]
+        for x in sorted(rows, key=lambda x: int(x["exit_ms"]))[-6:][::-1]:
+            lines.append(f"• {x['symbol'].replace('USDT', '')} {float(x['ret']) - float(x['funding']):+.1%} ({x['reason']}, "
+                         f"{time.strftime('%d %b', time.gmtime(int(x['exit_ms']) / 1000))})")
+        return "\n".join(lines)
+
+    def _fund50_step(self, st, now_ms, hist, marks):
+        lots, last = st["fund50"], st["fund50_last"]
+        for lid, x in list(lots.items()):
+            sym, px = x["symbol"], marks.get(x["symbol"])
+            rows = hist.get(sym) or []
+            fund_now = rows[-1]["fund"] if rows and rows[-1]["fund"] is not None else None
+            if fund_now is not None:                  # longs pay positive funding, accrued since the last sweep
+                x["funding"] += fund_now * (now_ms - x["t_acc"]) / HOUR_MS / 8760
+            x["t_acc"] = now_ms
+            if px:
+                x["hi"], x["lo"], x["last"], x["t_mark"] = max(x["hi"], px), min(x["lo"], px), px, now_ms
+            ret, reason = x["last"] / x["entry"] - 1, None
+            if ret <= -FUND50_SL:
+                ret, reason = -FUND50_SL, "sl"
+            elif now_ms - x["ts"] >= FUND50_HOURS * HOUR_MS:
+                reason = "time"
+            elif now_ms - x["t_mark"] >= FUND50_STALE_HOURS * HOUR_MS:
+                reason = "stale"
+            if reason:
+                _append_csv(self.dir / "fund50_results.csv", FUND50_COLS, {
+                    "signal_ms": int(x["ts"]), "symbol": sym, "entry": f"{x['entry']:.6g}", "fund72": f"{x['fund72']:.4g}",
+                    "vol": f"{x['vol']:.0f}", "exit_ms": int(now_ms), "ret": f"{ret:.6g}", "funding": f"{x['funding']:.6g}",
+                    "reason": reason, "max": f"{x['hi'] / x['entry'] - 1:.6g}", "min": f"{x['lo'] / x['entry'] - 1:.6g}"})
+                del lots[lid]
+        for sym, rows in hist.items():
+            if now_ms - last.get(sym, 0) < FUND50_REBUY_HOURS * HOUR_MS:
+                continue
+            f = fund50_features(rows, now_ms)
+            if fund50_matches(f):
+                last[sym] = now_ms
+                lots[f"{sym}|{int(now_ms)}"] = {"symbol": sym, "ts": now_ms, "entry": f["mark"], "hi": f["mark"],
+                                                "lo": f["mark"], "last": f["mark"], "t_mark": now_ms, "t_acc": now_ms,
+                                                "fund72": f["fund72"], "vol": f["vol"], "funding": 0.0}
+
     def _hi30(self, sym, now_ms):
         """30d peak funding, fetched once per sweep even when both books open the coin."""
         if sym not in self._hi30_cache:
@@ -477,6 +587,7 @@ class Watch:
         self._hi30_cache = {}
         for book in CARRY_BOOKS:
             self._carry_step(st, now_ms, hist, marks, book)
+        self._fund50_step(st, now_ms, hist, marks)
         st["last_sweep"] = now_ms
         self.save_state(st)
         return msgs

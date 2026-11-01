@@ -207,3 +207,36 @@ def test_carry14_book_holds_longer_with_wider_stop(logs, tmp_path):
     rep = w.carry_report(NOW + 337 * H, book="carry14")
     assert "14-day hold" in rep and "SL −50% / 14d" in rep and "1.5x" in rep and "Closed: 3" in rep
     assert "14d exit: 2" in rep and "stopped: 1" in rep
+
+
+def test_fund50_daily_lots_stop_time_and_funding(logs, tmp_path):
+    w = ww.Watch(tmp_path / "state")
+    w.fund_hi30 = lambda sym, now: None
+    hot = dict(fund_now=0.6, fund_base=0.6, ask_now=5.0, mark_now=0.038, hours=80, vol=2_000_000)
+    write_log(logs, ain_like("HOTUSDT", **hot) + ain_like("THINUSDT", **{**hot, "vol": 200_000})
+              + ain_like("NEWUSDT", **{**hot, "age": 30}) + ain_like("WARMUSDT", **{**hot, "fund_now": 0.4, "fund_base": 0.4})
+              + ain_like("DUMPUSDT", **hot))
+    hist = ww.load_history(NOW)
+    assert w.step(NOW, hist) == []                                     # silent
+    assert {x["symbol"] for x in w.load_state()["fund50"].values()} == {"HOTUSDT", "DUMPUSDT"}
+
+    def at(t, marks):
+        h = {k: list(v) for k, v in hist.items()}
+        for s, m in marks.items():
+            h[s].append({**h[s][-1], "ts": t, "mark": m})
+        w.step(t, h)
+
+    at(NOW + 1 * H, {"HOTUSDT": 0.038, "DUMPUSDT": 0.038})               # no second lot within 24h
+    assert len(w.load_state()["fund50"]) == 2
+    at(NOW + 24 * H, {"HOTUSDT": 0.040, "DUMPUSDT": 0.020})              # DUMP -47% -> stop at -40%; HOT re-buys
+    lots = w.load_state()["fund50"]
+    assert sorted(x["symbol"] for x in lots.values()) == ["DUMPUSDT", "HOTUSDT", "HOTUSDT"]   # DUMP re-qualifies too
+    res = w.fund50_results()
+    assert [(r["symbol"], r["reason"], float(r["ret"])) for r in res] == [("DUMPUSDT", "sl", -0.4)]
+    assert float(res[0]["funding"]) == pytest.approx(0.6 * 24 / 8760, rel=1e-4)
+    at(NOW + 168 * H, {"HOTUSDT": 0.0456, "DUMPUSDT": 0.020})            # first HOT lot: 7d time exit, +20%
+    hot = [r for r in w.fund50_results() if r["symbol"] == "HOTUSDT"]
+    assert len(hot) == 1 and hot[0]["reason"] == "time" and float(hot[0]["ret"]) == pytest.approx(0.2)
+    assert float(hot[0]["funding"]) == pytest.approx(0.6 * 168 / 8760, rel=1e-4)
+    rep = w.fund50_report(NOW + 169 * H)
+    assert "Closed: 2" in rep and "stopped 1" in rep and "HOT: " in rep and "≥ +50%/yr" in rep
