@@ -257,9 +257,9 @@ class Engine:
             if t <= p["cap_end"] and p["side"] * (p["entry"] - px) >= 0:
                 p["through"] += px * sz
             if p["exit_at"] is not None and t >= p["exit_at"]:
-                self._close(c, p, px, p["reason"], taker=True)
+                self._close(c, p, px, p["reason"], True, t)
             elif t >= p["tp_live"] and p["side"] * (px - p["tp"]) > 0:
-                self._close(c, p, p["tp"], "tp", taker=False)
+                self._close(c, p, p["tp"], "tp", False, t)
 
         # fills: a print strictly through a live level
         for o in list(c.orders):
@@ -282,13 +282,13 @@ class Engine:
                 if p["exit_at"] is None and now >= p["fill_t"] + MAX_HOLD_MS:
                     p["exit_at"], p["reason"] = now + self.ow, "time"
 
-    def _close(self, c, p, px, reason, taker):
+    def _close(self, c, p, px, reason, taker, t):
         c.pos.remove(p)
         net = p["side"] * (px / p["entry"] - 1) * 1e4 - MAKER_BP - (TAKER_BP if taker else MAKER_BP)
         size = min(NOTIONAL, SHARE * p["through"])
         _append(self.dir / "fills.csv", FILL_COLS, {
             "trig_ms": p["trig_t"] if p["trig_t"] is not None else "", "fill_ms": p["fill_t"],
-            "exit_ms": int(p["exit_at"] or p["fill_t"]), "coin": c.name, "vlm": vlm_bucket(c.vlm),
+            "exit_ms": t, "coin": c.name, "vlm": vlm_bucket(c.vlm),
             "level_bp": p["lvl"], "side": p["side"], "ref": f"{p['ref']:.6g}", "entry": f"{p['entry']:.6g}",
             "exit": f"{px:.6g}", "reason": reason,
             "tf_ms": "" if p["trig_t"] is None else p["fill_t"] - p["trig_t"],

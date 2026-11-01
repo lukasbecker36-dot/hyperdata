@@ -54,6 +54,7 @@ def test_sweep_fills_both_levels_and_takes_profit_halfway_back(eng, tmp_path):
     assert float(f["200"]["net_bp"]) == pytest.approx(0.99 / 0.98 * 1e4 - 1e4 - 3, abs=0.01)
     assert f["300"]["reason"] == "tp" and float(f["300"]["exit"]) == pytest.approx(0.985)
     assert f["200"]["tf_ms"] == "50" and f["200"]["vlm"] == "$10-50M"
+    assert int(f["200"]["exit_ms"]) == T0 + 13_000                 # the print that took the take-profit
     assert not eng.coins["X"].up                       # ladder stays off after the trigger
     assert eng.cnt["triggers"] == 1 and eng.cnt["cancels"] >= 1
 
