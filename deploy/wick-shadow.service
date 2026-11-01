@@ -1,0 +1,19 @@
+[Unit]
+Description=Wick shadow (paper micro-wick fade, real feed lag + order latency, no orders) via @Hyperfadebot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+EnvironmentFile=-/etc/hyperdata/telegram.env
+# Public market data only: never reads live.env, holds no key, cannot place an order.
+ExecStart=/usr/bin/python3 /opt/hyperdata/wick_shadow.py --datadir /opt/hyperdata/wick
+Restart=always
+RestartSec=15
+StandardOutput=append:/opt/hyperdata/wick/service.out
+StandardError=append:/opt/hyperdata/wick/service.err
+
+[Install]
+WantedBy=multi-user.target

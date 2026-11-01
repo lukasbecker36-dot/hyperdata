@@ -499,6 +499,16 @@ def cmd_carry():
     return wake_watch.Watch(WAKE_DIR).carry_report()
 
 
+# ---- wick shadow (wick_shadow.py, its own service) ------------------------------------
+WICK_DIR = os.environ.get("WICK_DATADIR", "/opt/hyperdata/wick")
+
+
+def cmd_wick():
+    """Paper P&L of the micro-wick fade: last 24h, then since start."""
+    import wick_shadow
+    return wick_shadow.report(WICK_DIR, hours=24) + "\n\n" + wick_shadow.report(WICK_DIR)
+
+
 ARG_HANDLERS = {
     "/unlock_go": lambda args: _unlock_cmd("go", args),
     "/unlock_skip": lambda args: _unlock_cmd("skip", args),
@@ -539,6 +549,7 @@ HELP = (
     "/unlock_close SYM — I've closed SYM · /unlock_skip SYM — not trading it\n"
     "/wake — wake-up watch: old spikers waking up (AIN pattern), followed 72h, hit rate so far\n"
     "/carry — carry rule paper P&L: open trades, closed tally, 4x return on capital\n"
+    "/wick — wick shadow: paper fills of the micro-wick fade, feed lag, request budget\n"
     "/help — this message")
 
 HANDLERS = {
@@ -554,6 +565,7 @@ HANDLERS = {
     "/unlocks": cmd_unlocks,
     "/wake": cmd_wake,
     "/carry": cmd_carry,
+    "/wick": cmd_wick,
     "/help": lambda: HELP,
     "/start": lambda: HELP,
 }
@@ -574,6 +586,7 @@ MENU = [
     ("unlock_close", "mark an unlock short closed: /unlock_close SYM"),
     ("wake", "wake-up watch: coins followed + hit rate"),
     ("carry", "carry rule paper P&L (open + closed, 4x ROC)"),
+    ("wick", "wick shadow: micro-wick fade paper P&L + lag"),
     ("help", "list commands"),
 ]
 

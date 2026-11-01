@@ -114,6 +114,27 @@ plain `.csv` for crash-safety), so expect `tape_YYYYMMDD.csv.gz` at ~30–55 MB/
 Check with `du -sh /opt/hyperdata/tape`. Old `.gz` files are kept (never auto-deleted) — add a
 retention cron if you ever want to prune, but you need the history for the VPIN backtest.
 
+### Wick shadow (paper micro-wick fade, no orders)
+
+`wick_shadow.py` (stdlib-only, reuses the tape logger's WebSocket client) paper-trades resting fade
+ladders at ±200/300bp on the ~60 coins doing $2M+/day, with this server's measured feed lag and
+order latency. It holds no key and never places an order. Daily summary to @Hyperfadebot at 00:05
+UTC, `/wick` in the monitor any time.
+
+```bash
+# as hyper
+mkdir -p /opt/hyperdata/wick && chown -R hyper:hyper /opt/hyperdata/wick
+# as root
+cp deploy/wick-shadow.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now wick-shadow
+systemctl restart telegram-monitor     # picks up /wick
+tail -f /opt/hyperdata/wick/service.out
+```
+
+Replay logged tape through the same engine (checks it against the backtest):
+`python3 wick_shadow.py --datadir /tmp/wr --replay /opt/hyperdata/tape/tape_20261031.csv.gz --lag-ms 400 --rtt-ms 230`
+
 ## 4. Watch it
 
 ```bash
