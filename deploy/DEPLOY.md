@@ -135,6 +135,25 @@ tail -f /opt/hyperdata/wick/service.out
 Replay logged tape through the same engine (checks it against the backtest):
 `python3 wick_shadow.py --datadir /tmp/wr --replay /opt/hyperdata/tape/tape_20261031.csv.gz --lag-ms 400 --rtt-ms 230`
 
+### Weekend gap logger (HL xyz vs Aster, logging only)
+
+`weekend_gap.py` (stdlib-only) records, once a minute, the executable price gap between the same
+stock / commodity / index perp on Hyperliquid's xyz dex and on Aster (~84 pairs, one HL + two Aster
+public requests per minute). No key, no orders. `/gap` in the monitor shows the last 7 days by
+session (weekend / weekday off-hours / US hours); a summary goes to @Hyperfadebot Mondays 14:00 UTC.
+Files: `gap_YYYYMMDD.csv` (~15 MB/day, gzipped to ~2 MB once the day ends).
+
+```bash
+# as hyper
+mkdir -p /opt/hyperdata/gap && chown -R hyper:hyper /opt/hyperdata/gap
+# as root
+cp deploy/weekend-gap.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now weekend-gap
+systemctl restart telegram-monitor     # picks up /gap
+tail -f /opt/hyperdata/gap/service.out
+```
+
 ## 4. Watch it
 
 ```bash

@@ -494,9 +494,10 @@ def cmd_wake():
 
 
 def cmd_carry():
-    """P&L of the carry rule's paper trades (opened/closed silently by wake_watch.py)."""
+    """P&L of the carry rule's paper books, 72h and 14-day (opened/closed silently by wake_watch.py)."""
     import wake_watch
-    return wake_watch.Watch(WAKE_DIR).carry_report()
+    w = wake_watch.Watch(WAKE_DIR)
+    return w.carry_report() + "\n\n" + w.carry_report(book="carry14")
 
 
 # ---- wick shadow (wick_shadow.py, its own service) ------------------------------------
@@ -507,6 +508,16 @@ def cmd_wick():
     """Paper P&L of the micro-wick fade: last 24h, then since start."""
     import wick_shadow
     return wick_shadow.report(WICK_DIR, hours=24) + "\n\n" + wick_shadow.report(WICK_DIR)
+
+
+# ---- weekend gap logger (weekend_gap.py, its own service) -----------------------------
+GAP_DIR = os.environ.get("GAP_DATADIR", "/opt/hyperdata/gap")
+
+
+def cmd_gap():
+    """HL xyz vs Aster price gap on the same stock/commodity perps, last 7 days by session."""
+    import weekend_gap
+    return weekend_gap.report(GAP_DIR)
 
 
 ARG_HANDLERS = {
@@ -548,8 +559,9 @@ HELP = (
     "/unlock_go SYM — I've shorted SYM (starts close reminder + squeeze watch)\n"
     "/unlock_close SYM — I've closed SYM · /unlock_skip SYM — not trading it\n"
     "/wake — wake-up watch: old spikers waking up (AIN pattern), followed 72h, hit rate so far\n"
-    "/carry — carry rule paper P&L: open trades, closed tally, 4x return on capital\n"
+    "/carry — carry rule paper P&L, 72h and 14-day books: open trades, closed tally, return on capital\n"
     "/wick — wick shadow: paper fills of the micro-wick fade, feed lag, request budget\n"
+    "/gap — weekend gap: HL xyz vs Aster price gap on the same stock/commodity perps, by session\n"
     "/help — this message")
 
 HANDLERS = {
@@ -566,6 +578,7 @@ HANDLERS = {
     "/wake": cmd_wake,
     "/carry": cmd_carry,
     "/wick": cmd_wick,
+    "/gap": cmd_gap,
     "/help": lambda: HELP,
     "/start": lambda: HELP,
 }
@@ -585,8 +598,9 @@ MENU = [
     ("unlocks", "pre-unlock shorts: open trades + upcoming"),
     ("unlock_close", "mark an unlock short closed: /unlock_close SYM"),
     ("wake", "wake-up watch: coins followed + hit rate"),
-    ("carry", "carry rule paper P&L (open + closed, 4x ROC)"),
+    ("carry", "carry rule paper P&L, 72h + 14d books"),
     ("wick", "wick shadow: micro-wick fade paper P&L + lag"),
+    ("gap", "weekend gap: HL xyz vs Aster, same perps"),
     ("help", "list commands"),
 ]
 
