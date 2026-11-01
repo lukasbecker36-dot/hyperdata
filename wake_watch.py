@@ -32,6 +32,9 @@ Long $100, TP +100% / SL -25% / 72h. Each trade is tagged "low" (72h funding +13
 "nosqueeze" (30d peak funding < +100%/yr, one Aster API call per new trade); both are tallied.
 Binance 2023-26: +1.9%/trade (90% CI +1.0..+2.8, 1,926 signals); Aster May-Oct 26: +2.4%.
 Negative 3-day funding did the opposite (-1.0%). No hour-scale wake-up timing tell was found.
+A second book, "carry14", takes the same entries with a 14-day hold, SL -50%, TP +100% (backtest with
+1% stop slippage, fees and funding: Binance 2023-26 +4.8%/trade, Aster +6.3%; the -50% stop leaves
+room for only ~1.5x leverage). Tallied in /carry and carry14_results.csv.
 
 DATA: the basis-trade engine's hourly scam-screen logs (SCAM_LOG_DIR, default
 /opt/basis-trade/output/scam_log_YYYYMMDD.csv[.gz]) -- funding, MEXC depth bands, marks,
@@ -66,6 +69,15 @@ FLAT_MOVE = 0.05         # variant "flat": price within +-5% of 6h ago
 LIQUID_VOL = 50_000.0    # variant "liquid": Aster 24h volume >= $50k
 CARRY_LO, CARRY_HI = 0.13, 0.30   # variant / paper rule "carry": 72h mean funding in this band (%/yr as fraction)
 CARRY_TP, CARRY_SL, CARRY_HOURS = 1.0, 0.25, 72.0
+# paper books on the carry entries: state key -> exits, results file, and what /carry shows
+CARRY_BOOKS = {
+    "carry": dict(tp=CARRY_TP, sl=CARRY_SL, hours=CARRY_HOURS, file="carry_results.csv",
+                  exits="TP +100% / SL −25% / 72h", leverage=4.0, cost=0.0022,      # fees 0.08% + funding ~0.14%
+                  backtest="≈ +2.7%/trade net, ≈ +5-10%/month on $600 at 4x; needs ~100 trades to judge"),
+    "carry14": dict(tp=1.0, sl=0.50, hours=336.0, file="carry14_results.csv",
+                    exits="TP +100% / SL −50% / 14d", leverage=1.5, cost=0.008,      # fees 0.08% + funding ~0.7%
+                    backtest="Binance +4.8%/trade, Aster +6.3% net (1% stop slippage); ~1.5x max at a −50% stop"),
+}
 CARRY_MIN_RET24 = -0.037          # filter: not falling over the last 24h (better in all 3 backtest samples)
 CARRY_LOW_FUND = 0.16             # tag "low": 72h funding +13-16%/yr, just above the default
 CARRY_SQUEEZE = 1.0               # tag "nosqueeze": peak funding over 30d below +100%/yr
@@ -255,7 +267,7 @@ class Watch:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.dir / "wake_watch.json"
         self.results_file = self.dir / "wake_watch_results.csv"
-        self.carry_file = self.dir / "carry_results.csv"
+        self.carry_file = self.dir / CARRY_BOOKS["carry"]["file"]
         self.fund_hi30 = fetch_fund_hi30          # swapped out in tests
 
     def load_state(self):
@@ -266,7 +278,8 @@ class Watch:
         st.setdefault("active", {})
         st.setdefault("last_alert", {})
         st.setdefault("last_sweep", 0)
-        st.setdefault("carry", {})
+        for book in CARRY_BOOKS:
+            st.setdefault(book, {})
         return st
 
     def save_state(self, st):
@@ -292,9 +305,9 @@ class Watch:
             out.append(f"{lab}: " + (_tally(sub) if sub else "none completed"))
         return "\n".join(out)
 
-    def carry_results(self):
+    def carry_results(self, book="carry"):
         try:
-            with open(self.carry_file, newline="") as f:
+            with open(self.dir / CARRY_BOOKS[book]["file"], newline="") as f:
                 return list(csv.DictReader(f))
         except FileNotFoundError:
             return []
@@ -327,15 +340,18 @@ class Watch:
             out.append(f"  {lab}: " + (tally(sub) if sub else "none closed"))
         return "\n".join(out)
 
-    def carry_report(self, now_ms=None, capital=600.0, leverage=4.0, cost=0.0022):
-        """/carry: the paper strategy's P&L -- open trades, closed tally, the 4x return on capital,
-        each tag, and the last few exits. `cost` = fees 0.08% + funding ~0.14% per trade (backtest)."""
+    def carry_report(self, now_ms=None, capital=600.0, book="carry"):
+        """/carry: one book's paper P&L -- open trades, closed tally, the return on capital at the
+        book's leverage, each tag, and the last few exits. The book's `cost` = fees + funding per trade."""
         now_ms = now_ms or time.time() * 1000
+        cfg = CARRY_BOOKS[book]
+        leverage, cost, hold = cfg["leverage"], cfg["cost"], cfg["hours"]
         st = self.load_state()
-        open_, rows = st["carry"], self.carry_results()
+        open_, rows = st[book], self.carry_results(book)
         margin = 100 / leverage
-        lines = ["<b>Carry rule</b> (paper) — old spiker, flat 6h, not falling 24h, 3d funding +13-30%/yr\n"
-                 f"$100 each · TP +100% / SL −25% / 72h · {leverage:.0f}x = ${margin:.0f} margin, ${capital:,.0f} capital"]
+        lines = [f"<b>Carry rule{' — 14-day hold' if book == 'carry14' else ''}</b> (paper) — old spiker, flat 6h, "
+                 "not falling 24h, 3d funding +13-30%/yr\n"
+                 f"$100 each · {cfg['exits']} · {leverage:g}x = ${margin:.0f} margin, ${capital:,.0f} capital"]
         unreal = sum(100 * (x["last"] / x["entry"] - 1) for x in open_.values())
         lines.append(f"\n<b>Open: {len(open_)}</b> · unrealised ${unreal:+,.0f}")
         for s, x in sorted(open_.items(), key=lambda kv: kv[1]["ts"]):
@@ -343,7 +359,7 @@ class Watch:
             lines.append(f"• {s.replace('USDT', '')}: {(now_ms - x['ts']) / HOUR_MS:.0f}h, {x['last'] / x['entry'] - 1:+.1%} "
                          f"(max {x['hi'] / x['entry'] - 1:+.0%}, min {x['lo'] / x['entry'] - 1:+.0%}){tg_}")
         if not rows:
-            lines.append("\n<b>Closed: none yet</b> — first exits within 72h of the first trades")
+            lines.append(f"\n<b>Closed: none yet</b> — first exits within {hold / 24:.0f}d of the first trades")
             return "\n".join(lines)
         r = [float(x["ret"]) for x in rows]
         gross, net = 100 * sum(r), 100 * sum(r) - 100 * cost * len(r)
@@ -358,10 +374,10 @@ class Watch:
                   f"P&L ${gross:+,.0f} gross · <b>${net:+,.0f} net</b> (≈{cost:.2%}/trade fees+funding)",
                   f"per trade: mean {statistics.mean(r):+.1%}, median {statistics.median(r):+.1%} · "
                   f"+100%: {sum(x['reason'] == 'tp' for x in rows)}, stopped: {sum(x['reason'] == 'sl' for x in rows)}, "
-                  f"72h exit: {sum(x['reason'] == 'time' for x in rows)}",
-                  f"{leverage:.0f}x on ${capital:,.0f}: net {net / capital:+.0%} ({net / capital * 30 / days:+.0%}/month), "
+                  f"{hold / 24:.0f}d exit: {sum(x['reason'] == 'time' for x in rows)}",
+                  f"{leverage:g}x on ${capital:,.0f}: net {net / capital:+.0%} ({net / capital * 30 / days:+.0%}/month), "
                   f"incl. unrealised {(net + unreal) / capital:+.0%} · peak open {peak} = ${peak * margin:,.0f} margin",
-                  "<i>backtest: ≈ +2.7%/trade net, ≈ +5-10%/month on $600 at 4x; needs ~100 trades to judge</i>"]
+                  f"<i>backtest: {cfg['backtest']}</i>"]
         for lab, k in (("funding +13-16%", "low"), ("no 30d squeeze", "nosqueeze")):
             sub = [float(x["ret"]) for x in rows if x.get(k) == "1"]
             lines.append(f"{lab}: " + (f"{len(sub)} closed, ${100 * sum(sub) - 100 * cost * len(sub):+,.0f} net, "
@@ -372,35 +388,42 @@ class Watch:
                          f"{time.strftime('%d %b %H:%M', time.gmtime(int(x['exit_ms']) / 1000))})")
         return "\n".join(lines)
 
-    def _carry_step(self, st, now_ms, hist, marks):
-        for sym, x in list(st["carry"].items()):
+    def _carry_step(self, st, now_ms, hist, marks, book="carry"):
+        cfg = CARRY_BOOKS[book]
+        for sym, x in list(st[book].items()):
             px = marks.get(sym)
             if px:
                 x["hi"], x["lo"], x["last"] = max(x["hi"], px), min(x["lo"], px), px
             ret, reason = x["last"] / x["entry"] - 1, None
-            if ret <= -CARRY_SL:
-                ret, reason = -CARRY_SL, "sl"
-            elif ret >= CARRY_TP:
-                ret, reason = CARRY_TP, "tp"
-            elif now_ms - x["ts"] >= CARRY_HOURS * HOUR_MS:
+            if ret <= -cfg["sl"]:
+                ret, reason = -cfg["sl"], "sl"
+            elif ret >= cfg["tp"]:
+                ret, reason = cfg["tp"], "tp"
+            elif now_ms - x["ts"] >= cfg["hours"] * HOUR_MS:
                 reason = "time"
             if reason:
-                _append_csv(self.carry_file, CARRY_COLS, {
+                _append_csv(self.dir / cfg["file"], CARRY_COLS, {
                     "signal_ms": int(x["ts"]), "symbol": sym, "entry": f"{x['entry']:.6g}", "fund72": f"{x['fund72']:.4g}",
                     "exit_ms": int(now_ms), "ret": f"{ret:.6g}", "reason": reason,
                     "max": f"{x['hi'] / x['entry'] - 1:.6g}", "min": f"{x['lo'] / x['entry'] - 1:.6g}",
                     "ret24": "" if x.get("ret24") is None else f"{x['ret24']:.4g}",
                     "fund_hi30": "" if x.get("fund_hi30") is None else f"{x['fund_hi30']:.4g}",
                     **{k: int(v) for k, v in carry_tags(x).items()}})
-                del st["carry"][sym]
+                del st[book][sym]
         for sym, rows in hist.items():
-            if sym in st["carry"]:
+            if sym in st[book]:
                 continue
             f = features(rows, now_ms)
             if carry_matches(f):
-                st["carry"][sym] = {"ts": now_ms, "entry": f["mark"], "hi": f["mark"], "lo": f["mark"],
-                                    "last": f["mark"], "fund72": f["fund72"], "ret24": f["ret24"],
-                                    "fund_hi30": self.fund_hi30(sym, now_ms)}
+                st[book][sym] = {"ts": now_ms, "entry": f["mark"], "hi": f["mark"], "lo": f["mark"],
+                                 "last": f["mark"], "fund72": f["fund72"], "ret24": f["ret24"],
+                                 "fund_hi30": self._hi30(sym, now_ms)}
+
+    def _hi30(self, sym, now_ms):
+        """30d peak funding, fetched once per sweep even when both books open the coin."""
+        if sym not in self._hi30_cache:
+            self._hi30_cache[sym] = self.fund_hi30(sym, now_ms)
+        return self._hi30_cache[sym]
 
     def step(self, now_ms, hist=None):
         """Process the sweep at now_ms: follow-ups for watched coins, then new matches.
@@ -451,7 +474,9 @@ class Watch:
                 f"{'n/a' if f.get('fund72') is None else format(f['fund72'], '+.0%')}/yr · variants: {tags(st['active'][sym])}\n"
                 f"  <i>WATCH ONLY: of the first 4 such cases 1 ran (AIN), 1 rose 21%, 2 went nowhere. "
                 f"Reports at 24h and 72h.</i>\n{self.stats_line()}")
-        self._carry_step(st, now_ms, hist, marks)
+        self._hi30_cache = {}
+        for book in CARRY_BOOKS:
+            self._carry_step(st, now_ms, hist, marks, book)
         st["last_sweep"] = now_ms
         self.save_state(st)
         return msgs

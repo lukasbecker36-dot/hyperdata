@@ -176,3 +176,34 @@ def test_carry_report(logs, tmp_path):
     assert "Open: 1" in rep and "FLAT: 6h, +5.0%" in rep and "low · nosqueeze" in rep
     assert "Closed: 1" in rep and "$+100 gross" in rep and "$+100 net" in rep    # 100 - 0.22
     assert "peak open 2 = $50 margin" in rep and "UP +100.0% (tp" in rep
+
+
+def test_carry14_book_holds_longer_with_wider_stop(logs, tmp_path):
+    w = ww.Watch(tmp_path / "state")
+    calls = []
+    w.fund_hi30 = lambda sym, now: calls.append(sym) or 0.5
+    calm = dict(fund_now=0.2, fund_base=0.2, ask_now=5.0, mark_now=0.038, hours=80)
+    write_log(logs, ain_like("DIPUSDT", **calm) + ain_like("CRASHUSDT", **calm) + ain_like("SLOWUSDT", **calm))
+    hist = ww.load_history(NOW)
+    w.step(NOW, hist)
+    st = w.load_state()
+    assert set(st["carry14"]) == set(st["carry"]) == {"DIPUSDT", "CRASHUSDT", "SLOWUSDT"}
+    assert sorted(calls) == ["CRASHUSDT", "DIPUSDT", "SLOWUSDT"]           # one API call per coin, not per book
+
+    def at(t, marks):
+        h = {k: list(v) for k, v in hist.items()}
+        for s, m in marks.items():
+            h[s].append({**h[s][-1], "ts": t, "mark": m})
+        w.step(t, h)
+
+    at(NOW + 5 * H, {"DIPUSDT": 0.027, "CRASHUSDT": 0.038, "SLOWUSDT": 0.038})   # -29%: 72h book stops, 14d holds
+    at(NOW + 100 * H, {"DIPUSDT": 0.030, "CRASHUSDT": 0.017, "SLOWUSDT": 0.040})  # -55% -> 14d stop at -50%
+    assert set(w.load_state()["carry14"]) == {"DIPUSDT", "SLOWUSDT"}
+    at(NOW + 336 * H, {"DIPUSDT": 0.0456, "SLOWUSDT": 0.038})
+    res = {r["symbol"]: r for r in w.carry_results("carry14")}
+    assert (res["CRASHUSDT"]["reason"], float(res["CRASHUSDT"]["ret"])) == ("sl", -0.5)
+    assert res["DIPUSDT"]["reason"] == "time" and float(res["DIPUSDT"]["ret"]) == pytest.approx(0.2)
+    assert {r["symbol"]: r["reason"] for r in w.carry_results()}["DIPUSDT"] == "sl"
+    rep = w.carry_report(NOW + 337 * H, book="carry14")
+    assert "14-day hold" in rep and "SL −50% / 14d" in rep and "1.5x" in rep and "Closed: 3" in rep
+    assert "14d exit: 2" in rep and "stopped: 1" in rep
