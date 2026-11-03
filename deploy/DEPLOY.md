@@ -154,6 +154,28 @@ systemctl restart telegram-monitor     # picks up /gap
 tail -f /opt/hyperdata/gap/service.out
 ```
 
+### Stock-perp paper books (HL xyz, paper only)
+
+`stock_paper.py` (stdlib-only) keeps two simulated books on Hyperliquid's xyz stock perps, $1,000 a
+side each, 2.5bp/side costs, funding accrued hourly: **funding carry** (00:00 UTC: short the top-20%
+24h funding, long the bottom-20%, 3-day cohorts) and **US intraday momentum** (11:00 New York: buy
+the top-10% / short the bottom-10% move since the last US close, out at 14:00 New York). One HL request
+an hour, plus a paced candle/funding pull per coin at each rebalance. No key, no orders. `/stocks` in
+the monitor shows P&L split into price / funding / costs, Sharpe so far and open positions; a weekly
+summary goes out Saturdays 12:00 UTC. NYSE holidays and half days are listed in `NYSE_CLOSED` /
+`NYSE_HALF`: extend them each year. Files: `state.json`, `trades.csv`, `equity.csv` (hourly).
+
+```bash
+# as hyper
+mkdir -p /opt/hyperdata/stockpaper && chown -R hyper:hyper /opt/hyperdata/stockpaper
+python3 /opt/hyperdata/stock_paper.py --dry      # today's picks, ~5 min (paced requests), no state written
+# as root
+cp deploy/stock-paper.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now stock-paper
+tail -f /opt/hyperdata/stockpaper/service.out
+```
+
 ### Restarts from Telegram (/update)
 
 `/update` pulls the repo and restarts every unit in `RESTART_UNITS` (set in

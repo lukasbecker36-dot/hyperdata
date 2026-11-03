@@ -1,0 +1,19 @@
+[Unit]
+Description=Stock-perp paper books (HL xyz funding carry + US intraday momentum, no orders) via @Hyperfadebot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+EnvironmentFile=-/etc/hyperdata/telegram.env
+# Public market data only: never reads live.env, holds no key, cannot place an order.
+ExecStart=/usr/bin/python3 /opt/hyperdata/stock_paper.py --datadir /opt/hyperdata/stockpaper
+Restart=always
+RestartSec=30
+StandardOutput=append:/opt/hyperdata/stockpaper/service.out
+StandardError=append:/opt/hyperdata/stockpaper/service.err
+
+[Install]
+WantedBy=multi-user.target

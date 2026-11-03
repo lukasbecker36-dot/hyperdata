@@ -526,6 +526,16 @@ def cmd_gap():
     return weekend_gap.report(GAP_DIR)
 
 
+# ---- stock-perp paper books (stock_paper.py, its own service) -------------------------
+STOCKS_DIR = os.environ.get("STOCKS_DATADIR", "/opt/hyperdata/stockpaper")
+
+
+def cmd_stocks():
+    """HL xyz paper books: funding carry and US intraday momentum."""
+    import stock_paper
+    return stock_paper.report(STOCKS_DIR)
+
+
 ARG_HANDLERS = {
     "/unlock_go": lambda args: _unlock_cmd("go", args),
     "/unlock_skip": lambda args: _unlock_cmd("skip", args),
@@ -569,6 +579,7 @@ HELP = (
     "/fund — funding momentum paper book: long coins with 3d funding ≥ +50%/yr, 7d hold\n"
     "/wick — wick shadow: paper fills of the micro-wick fade, feed lag, request budget\n"
     "/gap — weekend gap: HL xyz vs Aster price gap on the same stock/commodity perps, by session\n"
+    "/stocks — stock-perp paper books: funding carry + US intraday momentum on HL xyz\n"
     "/help — this message")
 
 HANDLERS = {
@@ -587,6 +598,7 @@ HANDLERS = {
     "/fund": cmd_fund,
     "/wick": cmd_wick,
     "/gap": cmd_gap,
+    "/stocks": cmd_stocks,
     "/help": lambda: HELP,
     "/start": lambda: HELP,
 }
@@ -610,6 +622,7 @@ MENU = [
     ("fund", "funding momentum paper book (3d funding ≥ +50%)"),
     ("wick", "wick shadow: micro-wick fade paper P&L + lag"),
     ("gap", "weekend gap: HL xyz vs Aster, same perps"),
+    ("stocks", "stock-perp paper books: carry + intraday momentum"),
     ("help", "list commands"),
 ]
 
