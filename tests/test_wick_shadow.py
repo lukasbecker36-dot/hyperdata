@@ -120,6 +120,18 @@ def test_disconnect_closes_positions_at_market_on_reconnect(eng, tmp_path):
     assert f["reason"] == "disconnect" and float(f["exit"]) == pytest.approx(0.982)
 
 
+def test_reconnect_does_not_hang_the_ladder_off_a_stale_price(eng, tmp_path):
+    feed(eng, calm(6000))                      # ladder up around 1.0
+    eng.on_disconnect(T0 + 6500)
+    eng.on_connect()
+    gap = 12 * 3600 * 1000                     # back 12h later, price now 0.84
+    feed(eng, [(gap + i, 0.84, 100) for i in range(0, 4900, 100)])
+    assert not eng.coins["X"].up and fills(tmp_path) == []   # needs 5s of fresh history first
+    feed(eng, [(gap + i, 0.84, 100) for i in range(4900, 6000, 100)])
+    c = eng.coins["X"]
+    assert c.up and c.ref[1] == pytest.approx(0.84) and fills(tmp_path) == []
+
+
 def test_report(eng, tmp_path):
     assert "no fills yet" in wsh.report(tmp_path)
     feed(eng, calm(10_000))

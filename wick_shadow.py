@@ -212,6 +212,13 @@ class Engine:
             for o in c.orders:                 # nothing fills while we are blind
                 o["dead"] = min(o["dead"], now)
             c.up = False
+            # Forget the price window: after the gap (or a coin dropping out of the universe and
+            # back in) the first print would otherwise age a stale price into the reference and
+            # hang the ladder off it (RUNE 2 Nov: ref 12h old, "filled" 17% above the market).
+            c.win.clear()
+            c.mx.clear()
+            c.mn.clear()
+            c.aged = None
             for p in c.pos:
                 if p["exit_at"] is None:
                     p["exit_at"], p["reason"] = now, "disconnect"
