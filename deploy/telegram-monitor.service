@@ -17,7 +17,8 @@ Environment=REPO_DIR=/opt/hyperdata
 # positions get no exit check. Restart the live arm by hand, when it is flat.
 # Every unit listed here also needs a line in /etc/sudoers.d/hyper-botctl (deploy/hyper-botctl.sudoers),
 # or its restart fails with a red cross in the /update reply.
-Environment=RESTART_UNITS=paper-bot-5m paper-bot-15m paper-bot-15m-mid paper-bot-15m-boll paper-bot-15m-boll-mid paper-bot-15m-ats wake-watch wick-shadow weekend-gap stock-paper
+# Quoted: unquoted, systemd splits at the spaces and keeps only the first unit.
+Environment="RESTART_UNITS=paper-bot-5m paper-bot-15m paper-bot-15m-mid paper-bot-15m-boll paper-bot-15m-boll-mid paper-bot-15m-ats wake-watch wick-shadow weekend-gap stock-paper"
 Environment=SYSTEMCTL=/usr/bin/systemctl
 ExecStart=/usr/bin/python3 /opt/hyperdata/telegram_monitor.py
 Restart=always

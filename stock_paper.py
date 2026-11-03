@@ -391,7 +391,7 @@ def report(datadir, now=None):
         lines += [f"\n<b>{desc[name]}</b>",
                   f"P&amp;L <b>${tot:+,.2f}</b> ({tot / SIDE_USD:+.1%}) · price ${b['price']:+,.2f} · funding "
                   f"${b['funding']:+,.2f} · costs −${b['cost']:,.2f}",
-                  f"{len(rets)} days · last 7d {sum(wk):+.1%} · Sharpe {'%+.1f' % sr if sr is not None else 'n/a (<5 days)'}"
+                  f"{len(rets)} days · last 7d {sum(wk):+.1%} · Sharpe {'%+.1f' % sr if sr is not None else 'n/a (under 5 days)'}"
                   f" · <i>{bt[name]}</i>"]
         if b["pos"]:
             pos = sorted(b["pos"].items(), key=lambda kv: -kv[1]["usd"])

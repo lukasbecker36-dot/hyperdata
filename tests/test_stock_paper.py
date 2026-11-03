@@ -102,6 +102,15 @@ def test_tick_runs_both_books_on_schedule(tmp_path):
     assert "US intraday momentum" in rep and "P&amp;L <b>$+9.00</b>" in rep
 
 
+def test_report_is_valid_telegram_html(tmp_path):
+    """Telegram rejects the whole message on a stray '<' or '&' (it parses HTML) -- /stocks then says nothing."""
+    import re
+    rep = sp.report(tmp_path)
+    assert "n/a (under 5 days)" in rep
+    assert not re.search(r"<(?!/?(b|i)>)", rep)
+    assert not re.search(r"&(?!(amp|lt|gt);)", rep)
+
+
 def test_no_intraday_on_holiday(tmp_path):
     st = sp.load_state(tmp_path)
     snap = {"C": {"mid": 100.0, "funding": 0.0, "vol": 1e6}}
