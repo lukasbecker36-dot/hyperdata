@@ -132,6 +132,43 @@ def test_reconnect_does_not_hang_the_ladder_off_a_stale_price(eng, tmp_path):
     assert c.up and c.ref[1] == pytest.approx(0.84) and fills(tmp_path) == []
 
 
+def test_fills_record_coins_open_at_once_and_exposure_is_logged(tmp_path):
+    e = wsh.Engine(tmp_path, vlm={"X": 20e6, "Y": 20e6}, ow_ms=OW)
+    for i in range(0, 6000, 100):              # both coins calm at 1.0 -> both ladders up
+        for coin in ("X", "Y"):
+            t = T0 + i
+            e.on_lag(t + LAG, LAG)
+            e.on_trade(t, coin, 1.0, 100, t + LAG)
+    assert e.coins["X"].up and e.coins["Y"].up
+    t = T0 + 6100                               # one sweep through X's buy levels, then Y's
+    for coin in ("X", "Y"):
+        e.on_lag(t + LAG, LAG)
+        e.on_trade(t, coin, 0.969, 50_000, t + LAG)
+    assert [p["conc"] for p in e.coins["X"].pos] == [1, 1] and [p["conc"] for p in e.coins["Y"].pos] == [2, 2]
+    assert e.exp["open_coins"] == 2 and e.exp["rest_buy_usd"] == 4 * wsh.NOTIONAL   # 2 coins x 2 buy levels
+    e.on_lag(T0 + 70_000, LAG)                 # next minute: flush the exposure row
+    with open(tmp_path / "exposure.csv", newline="") as f:
+        row = list(csv.DictReader(f))[0]
+    assert int(row["open_coins"]) == 2 and int(row["rest_coins"]) == 2
+    for coin in ("X", "Y"):                    # back at 1.0 -> take-profits
+        e.on_trade(T0 + 71_000, coin, 1.0, 100, T0 + 71_400)
+    got = sorted((r["coin"], r["open_coins"]) for r in fills(tmp_path))
+    assert got == [("X", "1"), ("X", "1"), ("Y", "2"), ("Y", "2")]
+    rep = wsh.report(tmp_path, now_ms=T0 + 72_000)
+    assert "coins open at once: up to 2" in rep and "a 3-coin cap would skip 0" in rep and "resting at $300/level" in rep
+
+
+def test_old_fills_file_gets_the_new_column(tmp_path):
+    old = wsh.FILL_COLS[:-1]
+    with open(tmp_path / "fills.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=old)
+        w.writeheader()
+        w.writerow({k: "1" for k in old})
+    wsh.Engine(tmp_path, vlm={"X": 20e6}, ow_ms=OW)
+    rows = fills(tmp_path)
+    assert rows[0]["coin"] == "1" and rows[0]["open_coins"] == "" and (tmp_path / "fills.csv.bak").exists()
+
+
 def test_report(eng, tmp_path):
     assert "no fills yet" in wsh.report(tmp_path)
     feed(eng, calm(10_000))

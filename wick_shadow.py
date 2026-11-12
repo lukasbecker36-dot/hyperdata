@@ -39,8 +39,11 @@ or through the level in the following 2s (others queue there too, this wallet am
 SAFETY PULLS (what the live bot will do): pull everything while feed lag > MAX_LAG_MS, and on any
 websocket disconnect (positions then exit at market on the first print after reconnecting).
 
-OUTPUT (datadir): fills.csv (one row per closed paper position), triggers.csv, lag.csv (feed lag
-per minute), state.json (order/modify/cancel counts = the request budget the live bot would use).
+OUTPUT (datadir): fills.csv (one row per closed paper position, with how many coins were open at once
+when it filled), triggers.csv, lag.csv (feed lag per minute), exposure.csv (per minute: peak $ resting in
+the ladders and $ in open positions -- Hyperliquid reserves margin for resting orders, so this is the
+capital a live account ties up), state.json (order/modify/cancel counts = the request budget the live
+bot would use).
 Daily summary to Telegram (@Hyperfadebot via telegram_notify) at 00:05 UTC; /wick in the monitor.
 
   python3 wick_shadow.py --datadir ./wick                               # live shadow
@@ -76,9 +79,14 @@ MIN_VLM = 2e6            # coins doing >= $2M/day
 MAX_COINS = 60
 INF = float("inf")
 FILL_COLS = ["trig_ms", "fill_ms", "exit_ms", "coin", "vlm", "level_bp", "side", "ref", "entry", "exit",
-             "reason", "tf_ms", "lag_ms", "ow_ms", "through_usd", "size_usd", "net_bp", "pnl_usd"]
+             "reason", "tf_ms", "lag_ms", "ow_ms", "through_usd", "size_usd", "net_bp", "pnl_usd",
+             "open_coins"]       # coins holding a position the moment this one filled (incl. this one)
 TRIG_COLS = ["t_ms", "coin", "dir", "ladder_up", "lag_ms"]
 LAG_COLS = ["minute_ms", "n", "p50", "p90", "max", "ow_ms"]
+# Per minute, the peak of what a live account would have tied up: Hyperliquid reserves margin for resting
+# orders too, so the ladders cost capital even when nothing fills. $ at NOTIONAL per level (scale linearly).
+EXP_COLS = ["minute_ms", "rest_buy_usd", "rest_sell_usd", "rest_coins", "open_coins", "open_usd"]
+CAP_CHECK = (3, 5)       # report: fills that a cap on coins open at once would have skipped
 COUNTERS = ("orders", "modifies", "cancels", "lag_pulls", "disconnects", "triggers", "fills")
 
 
@@ -86,6 +94,24 @@ def vlm_bucket(v):
     if v is None:
         return "?"
     return "$2-10M" if v < 10e6 else ("$10-50M" if v < 50e6 else ">$50M")
+
+
+def _upgrade_header(path, cols):
+    """Rewrite a CSV whose header predates `cols` (new columns blank), keeping the original as .bak."""
+    try:
+        with open(path, newline="") as f:
+            rows = list(csv.DictReader(f))
+            f.seek(0)
+            head = f.readline().strip().split(",")
+    except FileNotFoundError:
+        return
+    if head == cols:
+        return
+    path.replace(path.with_suffix(path.suffix + ".bak"))
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
 
 
 def _append(path, cols, row):
@@ -138,6 +164,22 @@ class Engine:
         except (FileNotFoundError, json.JSONDecodeError):
             self.since = None
         self.last_t = None
+        self.exp = None          # this minute's peak exposure (EXP_COLS)
+        _upgrade_header(self.dir / "fills.csv", FILL_COLS)
+
+    def _exposure(self):
+        """Fold the current resting orders and open positions into this minute's peak."""
+        buy = sell = 0.0
+        rest = opn = 0
+        for c in self.coins.values():
+            live = [o for o in c.orders if o["dead"] == INF]
+            buy += sum(NOTIONAL for o in live if o["side"] == 1)
+            sell += sum(NOTIONAL for o in live if o["side"] == -1)
+            rest += bool(live)
+            opn += bool(c.pos)
+        now = {"rest_buy_usd": buy, "rest_sell_usd": sell, "rest_coins": rest, "open_coins": opn,
+               "open_usd": sum(NOTIONAL * len(c.pos) for c in self.coins.values())}
+        self.exp = now if self.exp is None else {k: max(v, self.exp[k]) for k, v in now.items()}
 
     # ---------------- ladder ----------------
     def _place(self, c, now, sides=(1, -1)):
@@ -147,6 +189,7 @@ class Engine:
                 c.orders.append({"side": side, "lvl": lvl, "px": c.aged * (1 - side * lvl / 1e4),
                                  "ref": c.aged, "live": now + self.ow, "dead": INF})
         c.up, c.last_peg = True, now
+        self._exposure()
 
     def _pull(self, c, now):
         n = 0
@@ -203,6 +246,10 @@ class Engine:
             "minute_ms": self.lag_min, "n": len(b), "p50": round(b[len(b) // 2]),
             "p90": round(b[int(len(b) * 0.9)]), "max": round(b[-1]), "ow_ms": round(self.ow)})
         self.lag_buf = []
+        self._exposure()
+        _append(self.dir / "exposure.csv", EXP_COLS,
+                {"minute_ms": self.lag_min, **{k: round(v) for k, v in self.exp.items()}})
+        self.exp = None
         self.save_state()
 
     def on_disconnect(self, now, planned=False):
@@ -273,12 +320,14 @@ class Engine:
             if o["live"] <= t < o["dead"] and o["side"] * (o["px"] - px) > 0:
                 c.orders.remove(o)
                 self.cnt["fills"] += 1
-                c.pos.append({"side": o["side"], "lvl": o["lvl"], "entry": o["px"], "ref": o["ref"],
+                conc = sum(bool(x.pos) for x in self.coins.values()) + (not c.pos)
+                c.pos.append({"side": o["side"], "lvl": o["lvl"], "entry": o["px"], "ref": o["ref"], "conc": conc,
                               "fill_t": t, "recv": now, "trig_t": c.event_t if t - c.event_t <= 60_000 else None,
                               "tp": o["ref"] * (1 - o["side"] * o["lvl"] / 2e4), "tp_live": now + self.ow,
                               "cap_end": t + CAP_WIN_MS, "through": px * sz, "exit_at": None, "reason": None,
                               "lag": self.lag, "ow": self.ow})
         if any(p["fill_t"] == t for p in c.pos):
+            self._exposure()                    # peak open positions, before the rest of the ladder comes off
             self._pull(c, now)                  # whatever is left of the ladder comes off after a fill
         c.orders = [o for o in c.orders if o["dead"] > t]
         self._maybe_arm(c, t, now)
@@ -300,7 +349,8 @@ class Engine:
             "exit": f"{px:.6g}", "reason": reason,
             "tf_ms": "" if p["trig_t"] is None else p["fill_t"] - p["trig_t"],
             "lag_ms": round(p["lag"]), "ow_ms": round(p["ow"]), "through_usd": round(p["through"]),
-            "size_usd": round(size, 2), "net_bp": f"{net:.2f}", "pnl_usd": f"{size * net / 1e4:.4f}"})
+            "size_usd": round(size, 2), "net_bp": f"{net:.2f}", "pnl_usd": f"{size * net / 1e4:.4f}",
+            "open_coins": p.get("conc", "")})
 
     def save_state(self):
         st = {"since": self.since, **self.cnt, "updated": time.time() * 1000, "last_t": self.last_t,
@@ -357,6 +407,23 @@ def report(datadir, now_ms=None, hours=None):
         lines.append(f"best ${float(best[-1]['pnl_usd']):+.2f} ({best[-1]['coin']}), "
                      f"worst ${float(best[0]['pnl_usd']):+.2f} ({best[0]['coin']})")
         lines.append("<i>backtest at 0.6s: +200bp ≈ +41-45bp, +300bp ≈ +67-89bp per fill on $2M+ coins</i>")
+        known = [r for r in fills if r.get("open_coins")]
+        if known:
+            cc = [int(r["open_coins"]) for r in known]
+            caps = " · ".join(
+                f"a {k}-coin cap would skip {sum(x > k for x in cc)} (${sum(float(r['pnl_usd']) for r in known if int(r['open_coins']) > k):+,.2f})"
+                for k in CAP_CHECK)
+            lines.append(f"coins open at once: up to {max(cc)} · {caps} — of {len(known)} fills logged with it")
+    exp = [r for r in _rows(d / "exposure.csv") if int(r["minute_ms"]) >= lo]
+    if exp:
+        def peak(k):
+            return max(float(r[k]) for r in exp)
+        rest = sorted(float(r["rest_buy_usd"]) + float(r["rest_sell_usd"]) for r in exp)
+        net_peak = max(max(float(r["rest_buy_usd"]), float(r["rest_sell_usd"])) for r in exp)
+        lines.append(f"resting at ${NOTIONAL:.0f}/level: median ${rest[len(rest) // 2]:,.0f}, peak ${rest[-1]:,.0f} "
+                     f"(buys ${peak('rest_buy_usd'):,.0f} / sells ${peak('rest_sell_usd'):,.0f}) on up to "
+                     f"{peak('rest_coins'):.0f} coins → margin at 10x ${net_peak / 10:,.0f}-{rest[-1] / 10:,.0f} "
+                     f"(one side / both) · peak open {peak('open_coins'):.0f} coins ${peak('open_usd'):,.0f}")
     if trigs:
         lines.append(f"triggers {len(trigs)} ({sum(r['ladder_up'] == '1' for r in trigs)} with the ladder up)")
     if lags:
