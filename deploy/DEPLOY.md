@@ -116,6 +116,10 @@ retention cron if you ever want to prune, but you need the history for the VPIN 
 
 ### Wick shadow (paper micro-wick fade, no orders)
 
+**Switched off on 18 Nov 2026** (`systemctl disable --now wick-shadow`; out of RESTART_UNITS, the sudoers
+rules and the monitor's commands). The code and `/opt/hyperdata/wick` data are kept. The wake watch's
+`/carry` and `/fund` paper books were switched off the same day (`PAPER_BOOKS = False` in wake_watch.py).
+
 `wick_shadow.py` (stdlib-only, reuses the tape logger's WebSocket client) paper-trades resting fade
 ladders at ±200/300bp on the ~60 coins doing $2M+/day, with this server's measured feed lag and
 order latency. It holds no key and never places an order. Daily summary to @Hyperfadebot at 00:05

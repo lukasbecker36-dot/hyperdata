@@ -489,31 +489,13 @@ def cmd_wake():
     if st.get("last_sweep"):
         lines.append(f"<i>last sweep {datetime.fromtimestamp(st['last_sweep'] / 1000, timezone.utc):%m-%d %H:%M} UTC</i>")
     lines.append(w.stats_line())
-    lines.append(w.books_line(st))
+    if wake_watch.PAPER_BOOKS:
+        lines.append(w.books_line(st))
     return "\n".join(lines)
 
 
-def cmd_carry():
-    """P&L of the carry rule's paper books, 72h and 14-day (opened/closed silently by wake_watch.py)."""
-    import wake_watch
-    w = wake_watch.Watch(WAKE_DIR)
-    return w.carry_report() + "\n\n" + w.carry_report(book="carry14")
-
-
-def cmd_fund():
-    """Funding-momentum paper book: long coins with 3d funding >= +50%/yr (opened/closed silently by wake_watch.py)."""
-    import wake_watch
-    return wake_watch.Watch(WAKE_DIR).fund50_report()
-
-
-# ---- wick shadow (wick_shadow.py, its own service) ------------------------------------
-WICK_DIR = os.environ.get("WICK_DATADIR", "/opt/hyperdata/wick")
-
-
-def cmd_wick():
-    """Paper P&L of the micro-wick fade: last 24h, then since start."""
-    import wick_shadow
-    return wick_shadow.report(WICK_DIR, hours=24) + "\n\n" + wick_shadow.report(WICK_DIR)
+# The /carry and /fund paper books (wake_watch.py) and the /wick shadow (wick_shadow.py) were switched off on
+# 18 Nov 2026; their code and results files are kept.
 
 
 # ---- weekend gap logger (weekend_gap.py, its own service) -----------------------------
@@ -575,9 +557,6 @@ HELP = (
     "/unlock_go SYM — I've shorted SYM (starts close reminder + squeeze watch)\n"
     "/unlock_close SYM — I've closed SYM · /unlock_skip SYM — not trading it\n"
     "/wake — wake-up watch: old spikers waking up (AIN pattern), followed 72h, hit rate so far\n"
-    "/carry — carry rule paper P&L, 72h and 14-day books: open trades, closed tally, return on capital\n"
-    "/fund — funding momentum paper book: long coins with 3d funding ≥ +50%/yr, 7d hold\n"
-    "/wick — wick shadow: paper fills of the micro-wick fade, feed lag, request budget\n"
     "/gap — weekend gap: HL xyz vs Aster price gap on the same stock/commodity perps, by session\n"
     "/stocks — stock-perp paper books: funding carry + US intraday momentum on HL xyz\n"
     "/help — this message")
@@ -594,9 +573,6 @@ HANDLERS = {
     "/update": cmd_update,
     "/unlocks": cmd_unlocks,
     "/wake": cmd_wake,
-    "/carry": cmd_carry,
-    "/fund": cmd_fund,
-    "/wick": cmd_wick,
     "/gap": cmd_gap,
     "/stocks": cmd_stocks,
     "/help": lambda: HELP,
@@ -618,9 +594,6 @@ MENU = [
     ("unlocks", "pre-unlock shorts: open trades + upcoming"),
     ("unlock_close", "mark an unlock short closed: /unlock_close SYM"),
     ("wake", "wake-up watch: coins followed + hit rate"),
-    ("carry", "carry rule paper P&L, 72h + 14d books"),
-    ("fund", "funding momentum paper book (3d funding ≥ +50%)"),
-    ("wick", "wick shadow: micro-wick fade paper P&L + lag"),
     ("gap", "weekend gap: HL xyz vs Aster, same perps"),
     ("stocks", "stock-perp paper books: carry + intraday momentum"),
     ("help", "list commands"),

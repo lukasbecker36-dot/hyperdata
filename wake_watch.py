@@ -97,6 +97,10 @@ FUND50_HOURS, FUND50_SL = 168.0, 0.40
 FUND50_REBUY_HOURS = 24.0         # one new lot per coin per day while it qualifies
 FUND50_STALE_HOURS = 48.0         # no mark for this long (delisted / dropped from the sweep): close at the last mark
 FUND50_COST = 0.002               # fees, 0.1% a side (backtest assumption)
+# The carry (3d, 14d) and fund50 paper books were switched off on 18 Nov 2026: carry 3d -$153 over 43 trades
+# against a +2.7%/trade backtest, fund50 -$494 over 31 lots, both long-alt bets losing together. Their code and
+# results files are kept; True turns them back on (tests do).
+PAPER_BOOKS = False
 ASTER_API = "https://fapi.asterdex.com/fapi/v1/"
 HISTORY_HOURS = 76.0     # enough for the 72h funding mean
 RESULT_COLS = ["signal_ms", "symbol", "entry", "max_24h", "min_24h", "ret_24h",
@@ -577,9 +581,10 @@ class Watch:
                 f"  <i>WATCH ONLY: of the first 4 such cases 1 ran (AIN), 1 rose 21%, 2 went nowhere. "
                 f"Reports at 24h and 72h.</i>\n{self.stats_line()}")
         self._hi30_cache = {}
-        for book in CARRY_BOOKS:
-            self._carry_step(st, now_ms, hist, marks, book)
-        self._fund50_step(st, now_ms, hist, marks)
+        if PAPER_BOOKS:
+            for book in CARRY_BOOKS:
+                self._carry_step(st, now_ms, hist, marks, book)
+            self._fund50_step(st, now_ms, hist, marks)
         st["last_sweep"] = now_ms
         self.save_state(st)
         return msgs

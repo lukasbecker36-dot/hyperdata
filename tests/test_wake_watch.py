@@ -40,7 +40,19 @@ def logs(tmp_path, monkeypatch):
     d = tmp_path / "logs"
     d.mkdir()
     monkeypatch.setattr(ww, "LOG_DIR", d)
+    monkeypatch.setattr(ww, "PAPER_BOOKS", True)      # switched off in production since 18 Nov; still tested
     return d
+
+
+def test_paper_books_stay_shut_when_switched_off(logs, tmp_path, monkeypatch):
+    monkeypatch.setattr(ww, "PAPER_BOOKS", False)
+    w = ww.Watch(tmp_path / "state")
+    w.fund_hi30 = lambda sym, now: 0.5
+    calm = dict(fund_now=0.2, fund_base=0.2, ask_now=5.0, mark_now=0.038, hours=80)
+    write_log(logs, ain_like("DIPUSDT", **calm))
+    w.step(NOW, ww.load_history(NOW))
+    st = w.load_state()
+    assert st["carry"] == st["carry14"] == st["fund50"] == {}
 
 
 def test_ain_pattern_matches_and_variants_do_not(logs):
