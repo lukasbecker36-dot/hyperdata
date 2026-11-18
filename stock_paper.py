@@ -5,7 +5,10 @@ Stock-perp paper books -- simulate (never trade) two HL xyz strategies from the 
 FUNDING CARRY ("carry")
   Every day at 00:00 UTC rank the xyz perps (no FX / commodities) with >= $200k 24h volume and >= 14 days
   of history by their mean funding over the last 24h. Short the highest-funding 20%, buy the lowest 20%,
-  each side $1,000, inverse-volatility weighted (10d hourly vol). Each daily cohort is held 72h: the book
+  each side $1,000, inverse-volatility weighted (10d hourly vol), no name above 10% of its side. Simulated at
+  4x isolated margin: a position ~20% through its entry is liquidated and loses its margin (since 18 Nov 2026,
+  from a study of 72h moves: 4x liquidates ~1.4% of positions, 3x ~0.3%, 5x ~3.6%; HL's xyz perps are mostly
+  isolated-only, so a spare balance can't save a position). Each daily cohort is held 72h: the book
   is the average of the last three cohorts, rebalanced once a day. Shorts collect the funding longs pay.
   Backtest Apr-Nov 2026 at 2.5bp/side: Sharpe 1.1 dev (Apr-mid Aug), 3.9 holdout, maxDD -10%; negative in
   most variants before August, so the regime matters.
@@ -57,7 +60,9 @@ PREIPO = {"SPCX", "ANT", "OURA", "SHEIN", "CBRS", "NCLD", "BIRD", "SHAZ", "LYTE"
           "SNXX", "BOT"}
 NOT_US_STOCK = FX_COMM | INDEX | ASIA | PREIPO
 
-CARRY = dict(look_h=24, hold_d=3, q=0.2, min_vol=2e5, min_age_d=14)
+# Since 18 Nov 2026: no name above 10% of its side (inverse vol had put a third of the long side in STRC), and
+# 4x isolated margin -- liquidated about 20% against entry (25% margin less ~5% maintenance), losing the margin.
+CARRY = dict(look_h=24, hold_d=3, q=0.2, min_vol=2e5, min_age_d=14, cap=0.10, lev=4, maint=0.05)
 INTRA = dict(q=0.1, min_vol=5e5, min_names=3, entry=(11, 0), exit=(14, 0))   # New York wall clock
 # NYSE full closures and early closes (13:00 NY, before our 14:00 exit) -- skipped. Extend each year.
 NYSE_CLOSED = {"2026-11-26", "2026-12-25", "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
@@ -168,18 +173,37 @@ def hourly_vol(closes):
 
 
 # ------------------------------------------------------------------ portfolio construction
-def long_short(signal, vol, q, side_usd=SIDE_USD, min_n=3):
-    """Long the top q of `signal`, short the bottom q, each side `side_usd` split by inverse vol. {coin: usd}."""
+def capped_weights(raw, cap):
+    """Normalise `raw` ({coin: weight}) to sum 1 with no weight above `cap`; the excess goes to the rest pro rata.
+    With fewer than 1/cap names the cap can't hold, so it falls back to equal weights."""
+    if cap is None:
+        tot = sum(raw.values())
+        return {c: v / tot for c, v in raw.items()}
+    if len(raw) * cap < 1:
+        return {c: 1 / len(raw) for c in raw}
+    w, fixed = {}, {}
+    while True:
+        free = {c: v for c, v in raw.items() if c not in fixed}
+        left = 1 - sum(fixed.values())
+        tot = sum(free.values())
+        w = {**fixed, **{c: left * v / tot for c, v in free.items()}}
+        over = [c for c in free if w[c] > cap + 1e-12]
+        if not over:
+            return w
+        fixed.update({c: cap for c in over})
+
+
+def long_short(signal, vol, q, side_usd=SIDE_USD, min_n=3, cap=None):
+    """Long the top q of `signal`, short the bottom q, each side `side_usd` split by inverse vol (no name above `cap`
+    of its side). {coin: usd}."""
     s = sorted((v, c) for c, v in signal.items() if v is not None and vol.get(c))
     n = int(len(s) * q)
     if n < min_n:
         return {}
     out = {}
     for names, sign in (([c for _, c in s[-n:]], 1), ([c for _, c in s[:n]], -1)):
-        iv = {c: 1 / vol[c] for c in names}
-        tot = sum(iv.values())
-        for c in names:
-            out[c] = sign * side_usd * iv[c] / tot
+        for c, wt in capped_weights({c: 1 / vol[c] for c in names}, cap).items():
+            out[c] = sign * side_usd * wt
     return out
 
 
@@ -207,13 +231,35 @@ def new_book():
     return {"pos": {}, "price": 0.0, "funding": 0.0, "cost": 0.0, "t_mark": None}
 
 
-def mark(book, snap, now):
-    """Mark positions to `snap` mids; accrue funding at the current hourly rate for the time since the last mark."""
+def liq_price(p, lev, maint):
+    """Isolated-margin liquidation price of position `p` ({usd, entry}) at leverage `lev`."""
+    side = 1 if p["usd"] > 0 else -1
+    return p["entry"] * (1 - side * (1 / lev - maint))
+
+
+def mark(book, snap, now, lev=None, maint=0.05, name="", trades=None):
+    """Mark positions to `snap` mids; accrue funding at the current hourly rate for the time since the last mark.
+    With `lev`, a position whose mid is through its isolated liquidation price is closed and loses its whole margin
+    (1/lev of its notional at entry) -- checked on the hourly mid, so intra-hour wicks are missed."""
     hours = (now - book["t_mark"]) / HOUR if book["t_mark"] is not None else 0.0
-    for c, p in book["pos"].items():
+    for c, p in list(book["pos"].items()):
         s = snap.get(c)
         if not s:
             continue                                  # no quote: carry the last mark
+        p.setdefault("entry", p["px"])               # positions opened before entries were tracked
+        qty = p["usd"] / p["px"]
+        side = 1 if qty > 0 else -1
+        if lev and side * (s["mid"] - liq_price(p, lev, maint)) <= 0:
+            book["funding"] -= p["usd"] * s["funding"] * hours     # paid up to the liquidation
+            loss = -abs(qty) * p["entry"] / lev       # the margin
+            book["price"] += loss - qty * (p["px"] - p["entry"])   # less what was already marked since entry
+            book["liqs"] = book.get("liqs", 0) + 1
+            book["liq_usd"] = book.get("liq_usd", 0.0) + loss
+            del book["pos"][c]
+            if trades is not None:
+                trades.append({"ts": int(now), "book": name, "coin": c, "usd": f"{-qty * s['mid']:.2f}",
+                               "px": f"{s['mid']:.6g}", "reason": f"liquidated {lev}x"})
+            continue
         book["price"] += p["usd"] * (s["mid"] / p["px"] - 1)
         p["usd"] *= s["mid"] / p["px"]
         p["px"] = s["mid"]
@@ -236,8 +282,17 @@ def rebalance(book, target, snap, now, name, reason, trades):
                        "px": f"{s['mid']:.6g}", "reason": reason})
         if abs(want) < 1e-9:
             book["pos"].pop(c, None)
-        else:
-            book["pos"][c] = {"usd": want, "px": s["mid"]}
+            continue
+        old = book["pos"].get(c)
+        entry = s["mid"]
+        if old and old["usd"] * want > 0:
+            old_entry = old.get("entry", old["px"])
+            if abs(want) <= abs(cur):
+                entry = old_entry                     # trimming keeps the entry price
+            else:                                     # adding: quantity-weighted average
+                q_old, q_add = cur / s["mid"], (want - cur) / s["mid"]
+                entry = (q_old * old_entry + q_add * s["mid"]) / (q_old + q_add)
+        book["pos"][c] = {"usd": want, "px": s["mid"], "entry": entry}
 
 
 def equity_row(book, name, now):
@@ -267,7 +322,7 @@ def build_carry(snap, now, log=print):
                 sig[c] = -fm                          # high funding -> short
         except Exception as e:
             log(f"carry: {c} skipped ({e})")
-    return long_short(sig, vol, CARRY["q"]), {c: -v * 8760 for c, v in sig.items()}
+    return long_short(sig, vol, CARRY["q"], cap=CARRY["cap"]), {c: -v * 8760 for c, v in sig.items()}
 
 
 def build_intraday(snap, now, day, log=print):
@@ -319,8 +374,8 @@ def tick(st, snap, now, d, log=print, builders=None):
     """Mark, then run whatever decision falls due at `now`. Returns the trades made."""
     b = builders or {"carry": build_carry, "intraday": build_intraday}
     trades = []
-    for name in ("carry", "intraday"):
-        mark(st[name], snap, now)
+    mark(st["carry"], snap, now, lev=CARRY["lev"], maint=CARRY["maint"], name="carry", trades=trades)
+    mark(st["intraday"], snap, now)
     utc_day = time.strftime("%Y-%m-%d", time.gmtime(now))
     hour = time.gmtime(now).tm_hour
     if hour == 0 and st["carry_day"] != utc_day:
@@ -393,6 +448,14 @@ def report(datadir, now=None):
                   f"${b['funding']:+,.2f} · costs −${b['cost']:,.2f}",
                   f"{len(rets)} days · last 7d {sum(wk):+.1%} · Sharpe {'%+.1f' % sr if sr is not None else 'n/a (under 5 days)'}"
                   f" · <i>{bt[name]}</i>"]
+        if name == "carry":
+            gross = sum(abs(p["usd"]) for p in b["pos"].values())
+            margin = gross / CARRY["lev"]
+            acct = margin * 1.25
+            lines.append(f"{CARRY['lev']}x isolated, max {CARRY['cap']:.0%} a name (since 18 Nov): margin ${margin:,.0f} "
+                         f"on ${gross:,.0f} gross · account with 25% spare ${acct:,.0f} → P&amp;L "
+                         f"{f'{tot / acct:+.1%}' if acct else 'n/a'} on it · "
+                         f"liquidations {b.get('liqs', 0)} (${b.get('liq_usd', 0.0):+,.2f})")
         if b["pos"]:
             pos = sorted(b["pos"].items(), key=lambda kv: -kv[1]["usd"])
             lines.append("long " + ", ".join(f"{c} ${p['usd']:,.0f}" for c, p in pos if p["usd"] > 0)
