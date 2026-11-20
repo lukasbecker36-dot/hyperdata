@@ -141,6 +141,10 @@ Replay logged tape through the same engine (checks it against the backtest):
 
 ### Weekend gap logger (HL xyz vs Aster, logging only)
 
+**Switched off on 20 Nov 2026** (`systemctl disable --now weekend-gap`; out of RESTART_UNITS, the sudoers
+rules and the monitor's commands): Aster sits a few bp rich almost all the time and the gap doesn't open on
+weekends and shut on Mondays, so there is nothing to trade. The code and `/opt/hyperdata/gap` data are kept.
+
 `weekend_gap.py` (stdlib-only) records, once a minute, the executable price gap between the same
 stock / commodity / index perp on Hyperliquid's xyz dex and on Aster (~84 pairs, one HL + two Aster
 public requests per minute). No key, no orders. `/gap` in the monitor shows the last 7 days by

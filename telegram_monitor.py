@@ -495,17 +495,7 @@ def cmd_wake():
 
 
 # The /carry and /fund paper books (wake_watch.py) and the /wick shadow (wick_shadow.py) were switched off on
-# 18 Nov 2026; their code and results files are kept.
-
-
-# ---- weekend gap logger (weekend_gap.py, its own service) -----------------------------
-GAP_DIR = os.environ.get("GAP_DATADIR", "/opt/hyperdata/gap")
-
-
-def cmd_gap():
-    """HL xyz vs Aster price gap on the same stock/commodity perps, last 7 days by session."""
-    import weekend_gap
-    return weekend_gap.report(GAP_DIR)
+# 18 Nov 2026, and the /gap weekend-gap logger (weekend_gap.py) on 20 Nov; their code and data are kept.
 
 
 # ---- stock-perp paper books (stock_paper.py, its own service) -------------------------
@@ -557,7 +547,6 @@ HELP = (
     "/unlock_go SYM — I've shorted SYM (starts close reminder + squeeze watch)\n"
     "/unlock_close SYM — I've closed SYM · /unlock_skip SYM — not trading it\n"
     "/wake — wake-up watch: old spikers waking up (AIN pattern), followed 72h, hit rate so far\n"
-    "/gap — weekend gap: HL xyz vs Aster price gap on the same stock/commodity perps, by session\n"
     "/stocks — stock-perp paper books: funding carry + US intraday momentum on HL xyz\n"
     "/help — this message")
 
@@ -573,7 +562,6 @@ HANDLERS = {
     "/update": cmd_update,
     "/unlocks": cmd_unlocks,
     "/wake": cmd_wake,
-    "/gap": cmd_gap,
     "/stocks": cmd_stocks,
     "/help": lambda: HELP,
     "/start": lambda: HELP,
@@ -594,7 +582,6 @@ MENU = [
     ("unlocks", "pre-unlock shorts: open trades + upcoming"),
     ("unlock_close", "mark an unlock short closed: /unlock_close SYM"),
     ("wake", "wake-up watch: coins followed + hit rate"),
-    ("gap", "weekend gap: HL xyz vs Aster, same perps"),
     ("stocks", "stock-perp paper books: carry + intraday momentum"),
     ("help", "list commands"),
 ]
