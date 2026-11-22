@@ -359,3 +359,22 @@ audit was calibrated correctly and the real edge estimate holds. If it's much lo
 audit was optimistic and the arm needs re-judging before any size increase. Also watch
 `exit_taker` — every `1` is an exit that paid the spread, a cost no backtest or paper arm
 ever charged.
+
+## Wake-watch trader on Aster (wake_live.py, `wake-live`, `/wl`)
+
+Takes the wake watch's liquid signals on Aster perps: long $size at `lev`x isolated, half sold by a
+TAKE_PROFIT_MARKET trigger at +30%, the rest at +100%, anything left sold at market after 72h. Starts in
+PAPER mode; `/wl live` makes the next new trade real. Use an Aster account SEPARATE from the basis bot
+(one-way positions on the same coin would net against its hedge); coins already held on the account are
+never traded.
+
+    # once, as root
+    mkdir -p /opt/hyperdata/wakelive && chown hyper:hyper /opt/hyperdata/wakelive
+    install -m 0600 -o root -g root /dev/null /etc/hyperdata/wake_live.env
+    # edit it: WAKE_ASTER_SIGNER=0x<agent wallet address>  WAKE_ASTER_KEY=0x<agent private key>
+    install -m 0644 deploy/wake-live.service /etc/systemd/system/ && systemctl daemon-reload
+    install -m 0440 deploy/hyper-botctl.sudoers /etc/sudoers.d/hyper-botctl && visudo -c
+    sed -i 's/wake-watch stock-paper"/wake-watch wake-live stock-paper"/' /etc/systemd/system/telegram-monitor.service
+    systemctl daemon-reload && systemctl restart telegram-monitor
+    sudo -u hyper bash -c 'set -a; . /etc/hyperdata/wake_live.env; /opt/hyperdata/venv/bin/python /opt/hyperdata/wake_live.py --probe'
+    systemctl enable --now wake-live

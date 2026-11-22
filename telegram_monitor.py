@@ -508,7 +508,18 @@ def cmd_stocks():
     return stock_paper.report(STOCKS_DIR)
 
 
+# ---- wake-watch trader (wake_live.py, its own service) --------------------------------
+WAKE_LIVE_DIR = os.environ.get("WAKE_LIVE_DATADIR", "/opt/hyperdata/wakelive")
+
+
+def cmd_wl(args):
+    """/wl — the wake-watch trader on Aster: status, settings, paper/live, close."""
+    import wake_live
+    return wake_live.command(WAKE_LIVE_DIR, args)
+
+
 ARG_HANDLERS = {
+    "/wl": cmd_wl,
     "/unlock_go": lambda args: _unlock_cmd("go", args),
     "/unlock_skip": lambda args: _unlock_cmd("skip", args),
     "/unlock_close": lambda args: _unlock_cmd("close", args),
@@ -547,6 +558,8 @@ HELP = (
     "/unlock_go SYM — I've shorted SYM (starts close reminder + squeeze watch)\n"
     "/unlock_close SYM — I've closed SYM · /unlock_skip SYM — not trading it\n"
     "/wake — wake-up watch: old spikers waking up (AIN pattern), followed 72h, hit rate so far\n"
+    "/wl — wake trader on Aster (liquid signals, half +30% / rest +100% / 72h): /wl help for settings
+"
     "/stocks — stock-perp paper books: funding carry + US intraday momentum on HL xyz\n"
     "/help — this message")
 
@@ -582,6 +595,7 @@ MENU = [
     ("unlocks", "pre-unlock shorts: open trades + upcoming"),
     ("unlock_close", "mark an unlock short closed: /unlock_close SYM"),
     ("wake", "wake-up watch: coins followed + hit rate"),
+    ("wl", "wake trader on Aster: status (/wl help)"),
     ("stocks", "stock-perp paper books: carry + intraday momentum"),
     ("help", "list commands"),
 ]

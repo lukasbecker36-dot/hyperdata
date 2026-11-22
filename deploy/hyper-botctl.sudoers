@@ -9,5 +9,6 @@ hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart paper-bot-15m-boll
 hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart paper-bot-15m-boll-mid
 hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart paper-bot-15m-ats
 hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart wake-watch
+hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart wake-live
 hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart stock-paper
 hyper ALL=(root) NOPASSWD: /usr/bin/systemctl restart telegram-monitor

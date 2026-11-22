@@ -1,0 +1,24 @@
+[Unit]
+Description=Wake-watch trader on Aster perps (liquid signals; paper until /wl live) via @Hyperfadebot
+After=network-online.target wake-watch.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+EnvironmentFile=-/etc/hyperdata/telegram.env
+# WAKE_ASTER_SIGNER + WAKE_ASTER_KEY: an Aster API (agent) wallet on an account SEPARATE from the
+# basis bot's. Root-owned, chmod 600. Without it the trader runs paper only.
+EnvironmentFile=-/etc/hyperdata/wake_live.env
+Environment=WAKE_DATADIR=/opt/hyperdata/wakewatch
+# The venv has eth-account for Aster's EIP-712 signing. Restarts are safe: state is on disk and the
+# take-profit triggers rest on Aster.
+ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/wake_live.py --datadir /opt/hyperdata/wakelive
+Restart=always
+RestartSec=30
+StandardOutput=append:/opt/hyperdata/wakelive/service.out
+StandardError=append:/opt/hyperdata/wakelive/service.err
+
+[Install]
+WantedBy=multi-user.target
