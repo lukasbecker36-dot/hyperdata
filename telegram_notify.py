@@ -15,6 +15,10 @@ import urllib.request
 import urllib.parse
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+# TELEGRAM_QUIET=1 (set per service, e.g. a systemd drop-in) mutes that service's send() calls,
+# so the chat carries only the services left loud. Command replies from the monitor are unaffected
+# unless the monitor itself is made quiet.
+QUIET = os.environ.get("TELEGRAM_QUIET", "").strip().lower() in ("1", "true", "yes", "on")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 _API = "https://api.telegram.org/bot{token}/{method}"
@@ -43,7 +47,7 @@ def send(text, chat_id=None, buttons=None):
 
     `buttons` is an optional inline keyboard: rows of (label, callback_data) tuples.
     A tap arrives at the monitor's long-poll as a callback_query carrying that data."""
-    if not TOKEN:
+    if not TOKEN or QUIET:
         return False
     cid = chat_id or CHAT_ID
     if not cid:
