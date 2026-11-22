@@ -558,8 +558,7 @@ HELP = (
     "/unlock_go SYM — I've shorted SYM (starts close reminder + squeeze watch)\n"
     "/unlock_close SYM — I've closed SYM · /unlock_skip SYM — not trading it\n"
     "/wake — wake-up watch: old spikers waking up (AIN pattern), followed 72h, hit rate so far\n"
-    "/wl — wake trader on Aster (liquid signals, half +30% / rest +100% / 72h): /wl help for settings
-"
+    "/wl — wake trader on Aster (liquid signals, half +30% / rest +100% / 72h): /wl help for settings\n"
     "/stocks — stock-perp paper books: funding carry + US intraday momentum on HL xyz\n"
     "/help — this message")
 
