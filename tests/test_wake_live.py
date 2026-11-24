@@ -305,3 +305,23 @@ def test_sign_shape():
     p = ax._sign({"symbol": "AAAUSDT"})
     assert p["signer"] == "0x" + "11" * 20 and p["signature"].startswith("0x") and len(p["signature"]) == 132
     assert int(ax._sign({})["nonce"]) > int(p["nonce"])
+
+
+def test_report_shows_unrealised_per_trade_and_total(setup):
+    tr, ax, clock, msgs, signal = setup
+    tr.step()
+    signal("PPPUSDT", 1.0)                          # paper
+    tr.step()
+    wl.save_settings(tr.dir, mode="live")
+    signal("LLLUSDT", 2.0)                          # live, 50 @ 2.0
+    tr.step()
+    ax.marks["PPPUSDT"] = 1.1                       # paper +10% on $100
+    ax.tick("LLLUSDT", 2.7)                         # live: half (25) sold at 2.7, 25 left
+    ax.marks["LLLUSDT"] = 2.4
+    clock.ms += H
+    tr.step()
+    tr.step()                                       # the take-profit fill is seen, then marked at 2.4
+    rep = wl.report(tr.dir)
+    assert "PPPUSDT [paper]" in rep and "uPnL <b>$+10.00</b>" in rep
+    assert "LLLUSDT [live]" in rep and "uPnL <b>$+10.00</b>" in rep and "$+17.50 banked" in rep   # 25 x 0.4, 25 x 0.7
+    assert "live unrealised: $+10.00</b> on 1 open" in rep and "paper unrealised: $+10.00</b> on 1 open" in rep

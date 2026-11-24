@@ -323,6 +323,11 @@ class Trader:
                     self._live(st, sym, t, prem, pos, oo, now, force)
             except AsterError as e:
                 self.notify(f"⚠️ wake live {sym}: {e} — retrying next pass")
+        for sym, t in st["trades"].items():           # marks for /wl's unrealised P&L (the monitor has no keys)
+            if t["mode"] == "live" and t.get("entry") and sym in prem:
+                t["last"] = prem[sym][0]
+                if pos is not None:
+                    t["rem_qty"] = format(pos.get(sym, D(0)), "f")
         self._new_signals(st, cfg, prem, pos, now)
         self.save(st)
 
@@ -566,6 +571,21 @@ def totals_line(datadir, mode):
             f"best ${max(net):+.0f}, worst ${min(net):+.0f}")
 
 
+def trade_pnl(t):
+    """(unrealised $ on the part still held, $ banked by take-profits so far), price only (before fees/funding),
+    at the last mark the trader saw."""
+    e = t.get("entry")
+    if not e:
+        return 0.0, 0.0
+    last = t.get("last") or e
+    if t["mode"] == "paper":
+        return t["left"] * t["notional"] * (last / e - 1), t.get("realised", 0.0)
+    qty = float(t["qty"])
+    banked = sum(lg["frac"] * qty * (lg["px"] - e) for lg in t["legs"][:-1] if lg.get("filled") and lg.get("px"))
+    rem = float(t["rem_qty"]) if t.get("rem_qty") is not None else qty
+    return rem * (last - e), banked
+
+
 def report(datadir):
     cfg = load_settings(datadir)
     st = _read_json(Path(datadir) / "wake_live.json", {})
@@ -575,6 +595,7 @@ def report(datadir):
              f"${float(cfg['size']):.0f} at {int(cfg['lev'])}x isolated · max {int(cfg['max_open'])} open · "
              f"brake -${float(cfg['halt_loss']):.0f}" + (f" · <b>BRAKE ON since {st['halted']}</b>" if st.get("halted") else "")]
     trades = (st.get("trades") or {})
+    tot = {"live": [0.0, 0.0, 0], "paper": [0.0, 0.0, 0]}
     for sym, t in sorted(trades.items(), key=lambda kv: kv[1]["opened_ms"]):
         e = t.get("entry")
         if not e:
@@ -582,11 +603,20 @@ def report(datadir):
             continue
         last = t.get("last") or e
         hit = [f"+{lg['lv']:.0%}" for lg in t.get("legs", []) if lg.get("hit") or lg.get("filled")]
-        lines.append(f"• {sym} [{t['mode']}] {(now - t['opened_ms']) / HOUR_MS:.0f}h in, {e:.6g}"
-                     + (f" → {last:.6g} ({last / e - 1:+.0%})" if t["mode"] == "paper" else "")
-                     + (f" · took {', '.join(hit)}" if hit else ""))
+        upnl, banked = trade_pnl(t)
+        agg = tot[t["mode"]]
+        agg[0] += upnl
+        agg[1] += banked
+        agg[2] += 1
+        lines.append(f"• {sym} [{t['mode']}] {(now - t['opened_ms']) / HOUR_MS:.0f}h in, {e:.6g} → {last:.6g} "
+                     f"({last / e - 1:+.0%}) · uPnL <b>${upnl:+.2f}</b>"
+                     + (f" · took {', '.join(hit)} (${banked:+.2f} banked)" if hit else ""))
     if not trades:
         lines.append("no open trades")
+    for mode, (u, b, n) in tot.items():
+        if n:
+            lines.append(f"<b>{mode} unrealised: ${u:+,.2f}</b> on {n} open"
+                         + (f" (${b:+,.2f} more banked by take-profits)" if b else "") + " · price only, before fees/funding")
     if st.get("foreign"):
         lines.append(f"<i>positions on the Aster account not opened by this trader (never traded): "
                      f"{', '.join(st['foreign'])}</i>")
