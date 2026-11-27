@@ -1,0 +1,20 @@
+[Unit]
+Description=Dividend gap watch: Aster vs HL xyz stock perps around ex-dividend dates (alerts only) via @Hyperfadebot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hyper
+WorkingDirectory=/opt/hyperdata
+EnvironmentFile=-/etc/hyperdata/telegram.env
+# The ex-dividend calendar the stock carry bot keeps (hyperaster repo).
+Environment=DIVGAP_EXDIV=/opt/hyperaster/exdiv.json
+ExecStart=/opt/hyperdata/venv/bin/python /opt/hyperdata/div_gap_watch.py --datadir /opt/hyperdata/divgap
+Restart=always
+RestartSec=30
+StandardOutput=append:/opt/hyperdata/divgap/service.out
+StandardError=append:/opt/hyperdata/divgap/service.err
+
+[Install]
+WantedBy=multi-user.target

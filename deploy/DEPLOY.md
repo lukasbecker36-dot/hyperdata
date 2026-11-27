@@ -378,3 +378,17 @@ never traded.
     systemctl daemon-reload && systemctl restart telegram-monitor
     sudo -u hyper bash -c 'set -a; . /etc/hyperdata/wake_live.env; /opt/hyperdata/venv/bin/python /opt/hyperdata/wake_live.py --probe'
     systemctl enable --now wake-live
+
+## Dividend gap watch (div_gap_watch.py, `div-gap-watch`)
+
+Alerts only. Every minute it compares each stock listed on both Aster and HL's xyz dex (tradable prices:
+Aster top of book, HL impact prices). It alerts @Hyperfadebot when they trade apart: >= 1% near an ex-date
+in `/opt/hyperaster/exdiv.json` (held 3 min), >= 2% otherwise (held 30 min), with >= $5k on Aster within
+0.5% of the top. HL's xyz perps price the dividend drop in ahead of the ex-date open; Aster's books
+sometimes don't, and the gap closes at the open (SK Hynix, 27 Nov 2026: ~2.1% -> 0.15%).
+
+    sudo mkdir -p /opt/hyperdata/divgap && sudo chown hyper: /opt/hyperdata/divgap
+    sudo cp deploy/div-gap-watch.service /etc/systemd/system/
+    sudo systemctl daemon-reload && sudo systemctl enable --now div-gap-watch
+
+Not muted (no telegram-quiet drop-in): it's one of the alerts meant for this chat.
