@@ -45,7 +45,9 @@ class Fake:
             return [{"universe": [{"name": "xyz:SKHX"}, {"name": "xyz:IBM"}]},
                     [{"impactPxs": ["772.0", "773.0"], "funding": "-0.0001"}, {"impactPxs": ["300", "300.1"]}]]
         if "exchangeInfo" in url:
-            return {"symbols": [{"symbol": "SKHYNIXUSDT", "status": "TRADING"}, {"symbol": "IBMUSDT", "status": "TRADING"}]}
+            return {"symbols": [{"symbol": "SKHYNIXUSDT", "status": "TRADING", "underlyingSubType": ["STOCK"]},
+                                {"symbol": "IBMUSDT", "status": "TRADING", "underlyingSubType": ["STOCK"]},
+                                {"symbol": "BBUSDT", "status": "TRADING", "underlyingSubType": []}]}
         if "bookTicker" in url:
             return [{"symbol": "SKHYNIXUSDT", "bidPrice": str(self.a_bid), "askPrice": str(self.a_bid + 0.3)},
                     {"symbol": "IBMUSDT", "bidPrice": "299.9", "askPrice": "300.2"}]
@@ -82,3 +84,11 @@ def test_off_calendar_gap_needs_two_percent_for_half_an_hour(tmp_path, monkeypat
     assert sent == []
     w.check(datetime(2026, 11, 26, 15, tzinfo=timezone.utc).timestamp())
     assert len(sent) == 1 and "no ex-date in the calendar" in sent[0]
+
+
+def test_only_stock_listings_are_paired(tmp_path, monkeypatch):
+    w, sent = run_checks(tmp_path, monkeypatch, Fake(a_bid=789.0), 1)
+    w.get = lambda url, body=None: ({"universe": [{"name": "xyz:SKHX"}, {"name": "xyz:BB"}]} if body
+                                    else Fake(1.0)(url))
+    w.refresh_pairs()
+    assert w.pairs == {"SKHX": "SKHYNIXUSDT"}                     # Aster's BBUSDT is a crypto coin

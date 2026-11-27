@@ -130,7 +130,9 @@ class Watch:
         meta = self.get(HL, {"type": "meta", "dex": "xyz"})
         xyz = {u["name"].split(":")[-1] for u in meta["universe"] if not u.get("isDelisted")}
         info = self.get(f"{ASTER}/fapi/v1/exchangeInfo")
-        live = {s["symbol"] for s in info["symbols"] if s.get("status") == "TRADING"}
+        # stocks and ETFs only: Aster's BBUSDT / QNTUSDT are crypto coins, not BlackBerry / the xyz QNT
+        live = {s["symbol"] for s in info["symbols"] if s.get("status") == "TRADING"
+                and {"STOCK", "ETF"} & set(s.get("underlyingSubType") or [])}
         self.pairs = {n: ALIAS.get(n, n + "USDT") for n in xyz if ALIAS.get(n, n + "USDT") in live}
         self.pairs_at = time.time()
 
@@ -159,6 +161,8 @@ class Watch:
             hb, ha, hf = hl[n]
             ab, aa = book[sym]
             g, side = gap(hb, ha, ab, aa)
+            if g > 0.25:
+                continue                                  # not the same thing (a different listing or units)
             ev = step(pst, n, g, n in win)
             if ev == "open" or ev == "grow":
                 dep = self.depth(sym, ab if side.startswith("short Aster") else aa,
