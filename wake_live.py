@@ -635,7 +635,7 @@ def report(datadir):
     cfg = load_settings(datadir)
     st = _read_json(Path(datadir) / "wake_live.json", {})
     now = time.time() * 1000
-    lines = [f"<b>Wake live</b> — liquid wake-watch signals on Aster: half off +30%, rest +100%, else 72h",
+    lines = [f"<b>Wake live</b> — liquid wake-watch signals on Aster: half off +30% (then stop at entry), rest +100%, else 72h",
              f"entries {'ON' if cfg['enabled'] else 'OFF'} · new trades <b>{cfg['mode'].upper()}</b> · "
              f"${float(cfg['size']):.0f} at {int(cfg['lev'])}x isolated · max {int(cfg['max_open'])} open · "
              f"brake -${float(cfg['halt_loss']):.0f}" + (f" · <b>BRAKE ON since {st['halted']}</b>" if st.get("halted") else "")]
