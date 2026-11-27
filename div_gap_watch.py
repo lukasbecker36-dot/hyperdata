@@ -8,14 +8,18 @@ WHY (24-27 Nov 2026, scratchpad div_venues.py)
   starts pricing that in days before (funding turns negative for longs). Aster's books don't always do the same
   (its market makers seem to hedge on venues that treat dividends differently). SK Hynix, 1.89% dividend, ex
   27 Nov: Aster traded 1.1-1.5% above HL from 25 Nov and 2.0-2.3% above for the 11 hours before the Korean
-  open, then 0.15% after it. Short Aster / long HL over that window: ~1.7% net. Samsung (Sep), IBM and BX
+  open, then 0.15% after it. Most of that gap was fair (see the special funding below). Samsung (Sep), IBM and BX
   showed nothing, so it's occasional; Aster's depth (~$70-150k in 10 levels on SKHYNIX) caps the size.
 
 RULES
   Every minute: tradable gap per pair = Aster bid / HL ask - 1 (short Aster) or HL bid / Aster ask - 1
   (short HL), on HL's impact prices and Aster's top of book.
   - A name inside an ex-dividend window (hyperaster's exdiv.json, from 2 days before to 1 day after) alerts
-    at >= 1.0% held for 3 checks.
+    when the gap is >= 1.0% BEYOND the dividend, held for 3 checks. Aster pays its longs the dividend as
+    "special dividend funding" from shorts, just before the open (08:00 KST / 09:00 HKT / 20:00 ET the day
+    before; reduce-only for 30 min before it: docs.asterdex.com, "Dividend introduction for Equity
+    Perpetual Futures"). HL pays nothing; its book prices the drop in instead. So Aster ~ the dividend above
+    HL is fair: SK Hynix's 2.1% against a 1.89% dividend was ~0.2% of edge, not 1.9%.
   - Any other name needs >= 2.0% held for 30 checks (catches dividends missing from the calendar; stale
     off-hours quotes on thin Aster books are what the wait and the depth floor filter out).
   - Either way Aster must show >= $5k within 0.5% of the top on the side you'd trade.
@@ -57,6 +61,16 @@ def get(url, body=None, timeout=20):
 def gap(h_bid, h_ask, a_bid, a_ask):
     """(gap, side): the better of short-Aster (Aster bid over HL ask) and short-HL (HL bid over Aster ask)."""
     g_a = a_bid / h_ask - 1 if h_ask > 0 else 0.0
+    g_h = h_bid / a_ask - 1 if a_ask > 0 else 0.0
+    return (g_a, "short Aster / long HL") if g_a >= g_h else (g_h, "short HL / long Aster")
+
+
+def excess(h_bid, h_ask, a_bid, a_ask, div):
+    """Near an ex-date Aster's longs are paid the dividend (special funding from shorts, just before the open)
+    and HL's aren't, so Aster trading ~`div` above HL is fair. (excess over that, side): Aster above HL by
+    more than the dividend (short Aster, which pays the dividend, / long HL), or HL above Aster at all (long
+    Aster, which collects it, / short HL)."""
+    g_a = a_bid / h_ask - 1 - div if h_ask > 0 else 0.0
     g_h = h_bid / a_ask - 1 if a_ask > 0 else 0.0
     return (g_a, "short Aster / long HL") if g_a >= g_h else (g_h, "short HL / long Aster")
 
@@ -163,6 +177,8 @@ class Watch:
             g, side = gap(hb, ha, ab, aa)
             if g > 0.25:
                 continue                                  # not the same thing (a different listing or units)
+            if n in win:                                  # Aster pays its longs the dividend: that much is fair
+                g, side = excess(hb, ha, ab, aa, float(win[n].get("pct", 0)) / 100)
             ev = step(pst, n, g, n in win)
             if ev == "open" or ev == "grow":
                 dep = self.depth(sym, ab if side.startswith("short Aster") else aa,
@@ -188,8 +204,10 @@ class Watch:
         hb, ha, ab, aa = px
         legs = (f"Aster bid {ab:.6g} vs HL ask {ha:.6g}" if side.startswith("short Aster")
                 else f"HL bid {hb:.6g} vs Aster ask {aa:.6g}")
-        ex = (f"ex-div {ent['from']}{'' if ent['to'] == ent['from'] else '..' + ent['to']} (~{ent['pct']}%)" if ent
-              else "<i>no ex-date in the calendar: check for a dividend or a stale quote</i>")
+        ex = (f"ex-div {ent['from']}{'' if ent['to'] == ent['from'] else '..' + ent['to']} (~{ent['pct']}%): this is the gap "
+              f"<b>beyond</b> the dividend, which Aster pays its longs (special funding from shorts, just before the open)"
+              if ent else "<i>no ex-date in the calendar: if it's a dividend, a gap about its size is fair (Aster pays "
+              "its longs the dividend, HL doesn't); else a stale quote?</i>")
         opn = "00:00 UTC (Asian open)" if n in ASIA_OPEN else "~14:30 UTC (US open)"
         return (f"{'💱' if ev == 'open' else '📈'} <b>div gap {n}</b> {g:+.2%} — {side}\n"
                 f"{legs} · {ex}\n"

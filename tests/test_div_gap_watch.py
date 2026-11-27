@@ -68,14 +68,26 @@ def run_checks(tmp_path, monkeypatch, fake, n, cal=True):
     return w, sent
 
 
-def test_alerts_skhynix_before_its_ex_date(tmp_path, monkeypatch):
-    w, sent = run_checks(tmp_path, monkeypatch, Fake(a_bid=789.0), 3)
+def test_gap_about_the_dividend_is_fair_and_not_alerted(tmp_path, monkeypatch):
+    w, sent = run_checks(tmp_path, monkeypatch, Fake(a_bid=789.0), 5)        # +2.07% vs a 1.9% dividend
+    assert sent == []
+
+
+def test_excess_subtracts_the_dividend_only_when_aster_is_rich():
+    g, side = dg.excess(99.9, 100.0, 103.0, 103.1, 0.019)
+    assert g == pytest.approx(0.011) and side.startswith("short Aster")
+    g, side = dg.excess(101.5, 101.6, 99.9, 100.0, 0.019)
+    assert g == pytest.approx(0.015) and side.startswith("short HL")
+
+
+def test_alerts_skhynix_beyond_its_dividend(tmp_path, monkeypatch):
+    w, sent = run_checks(tmp_path, monkeypatch, Fake(a_bid=797.0), 3)        # +3.1%: 1.2% beyond the dividend
     assert len(sent) == 1 and "div gap SKHX" in sent[0] and "short Aster" in sent[0] and "ex-div 2026-11-27" in sent[0]
     assert "IBM" not in sent[0]
 
 
 def test_thin_aster_book_is_not_alerted(tmp_path, monkeypatch):
-    w, sent = run_checks(tmp_path, monkeypatch, Fake(a_bid=789.0, depth_qty=1.0), 5)
+    w, sent = run_checks(tmp_path, monkeypatch, Fake(a_bid=797.0, depth_qty=1.0), 5)
     assert sent == []
 
 
