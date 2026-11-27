@@ -88,7 +88,10 @@ class FakeAster:
         """Move the mark and fire any trigger orders it crosses."""
         self.marks[sym] = px
         for o in self.orders.values():
-            if o.get("symbol") == sym and o["status"] == "NEW" and px >= float(o["stopPrice"]):
+            if o.get("symbol") != sym or o["status"] != "NEW" or "stopPrice" not in o:
+                continue
+            down = o["type"] == "STOP_MARKET"
+            if (px <= float(o["stopPrice"])) if down else (px >= float(o["stopPrice"])):
                 left = self.pos.get(sym, Decimal(0))
                 q = left if o.get("closePosition") else min(left, Decimal(o["quantity"]))
                 if q > 0:
@@ -325,3 +328,64 @@ def test_report_shows_unrealised_per_trade_and_total(setup):
     assert "PPPUSDT [paper]" in rep and "uPnL <b>$+10.00</b>" in rep
     assert "LLLUSDT [live]" in rep and "uPnL <b>$+10.00</b>" in rep and "$+17.50 banked" in rep   # 25 x 0.4, 25 x 0.7
     assert "live unrealised: $+10.00</b> on 1 open" in rep and "paper unrealised: $+10.00</b> on 1 open" in rep
+
+
+
+def test_live_stop_moves_to_entry_after_the_first_take_profit(setup):
+    tr, ax, clock, msgs, signal = setup
+    tr.step()
+    wl.save_settings(tr.dir, mode="live")
+    signal("AAAUSDT", 2.0)
+    tr.step()
+    ax.tick("AAAUSDT", 2.7)                     # +30% half fills
+    clock.ms += H
+    tr.step()
+    stops = [o for o in ax.orders.values() if o["type"] == "STOP_MARKET"]
+    assert len(stops) == 1 and stops[0]["stopPrice"] == "2.0" and stops[0]["closePosition"] == "true"
+    assert any("stop on the rest moved to entry" in m for m in msgs)
+    tr.step()
+    assert len([o for o in ax.orders.values() if o["type"] == "STOP_MARKET"]) == 1      # placed once
+    assert "stop at entry" in wl.report(tr.dir)
+    ax.tick("AAAUSDT", 1.95)                    # back through entry: the stop sells the rest
+    ax.income_rows = [{"incomeType": "REALIZED_PNL", "income": "14.0"}, {"incomeType": "COMMISSION", "income": "-0.1"}]
+    clock.ms += H
+    tr.step()
+    tr.step()
+    r = wl.closed_trades(tr.dir)[0]
+    assert r["reason"] == "stop at entry after +30%" and float(r["net"]) == pytest.approx(13.9)
+
+
+def test_live_stop_below_the_mark_sells_the_rest_at_market(setup):
+    tr, ax, clock, msgs, signal = setup
+    tr.step()
+    wl.save_settings(tr.dir, mode="live")
+    signal("AAAUSDT", 2.0)
+    tr.step()
+    ax.tick("AAAUSDT", 2.7)
+    ax.marks["AAAUSDT"] = 1.9                   # already back under entry when the fill is seen
+    real = ax.order
+
+    def order(**p):
+        if p["type"] == "STOP_MARKET":
+            raise wl.AsterError("Order would immediately trigger.", code=-2021)
+        return real(**p)
+    ax.order = order
+    clock.ms += H
+    tr.step()
+    assert ax.pos["AAAUSDT"] == 0 and any("sold the rest at market" in m for m in msgs)
+
+
+def test_paper_stop_at_entry_after_the_first_take_profit(setup):
+    tr, ax, clock, msgs, signal = setup
+    tr.step()
+    signal("AAAUSDT", 1.0)
+    tr.step()
+    ax.marks["AAAUSDT"] = 1.35
+    clock.ms += H
+    tr.step()
+    ax.marks["AAAUSDT"] = 0.99
+    clock.ms += H
+    tr.step()
+    r = wl.closed_trades(tr.dir)[0]
+    assert r["reason"] == "stop at entry after +30%"
+    assert float(r["price_pnl"]) == pytest.approx(100 * (0.5 * 0.3 + 0.5 * -0.01))

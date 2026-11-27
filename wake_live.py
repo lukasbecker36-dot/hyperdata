@@ -11,7 +11,10 @@ Rule (backtest on Aster prices and funding, 46 liquid signals 28 Oct - 19 Nov 20
     long $size at market, isolated, `lev`x
     sell half if it reaches +30%, the rest if it reaches +100%   (TAKE_PROFIT_MARKET triggers)
     whatever is left is sold at market 72h after entry
-No stop: at 2x isolated the liquidation (~-48%) is the stop. Aster rejects LIMIT sells more than
+Once the +30% half has filled, the rest gets a stop at entry (STOP_MARKET, closePosition): backtest
+27 Nov on 54 signals, +$432 vs +$387 with no stop, no +100% runner cut (stops at entry..+10% all
+~+$430-440; +15% and up start cutting runners). Before that there's no stop: at 2x isolated the
+liquidation (~-48%) is the stop. Aster rejects LIMIT sells more than
 10% above the mark (PERCENT_PRICE), so the take-profits are trigger orders resting on Aster;
 they fire even while this service is down.
 
@@ -47,6 +50,7 @@ WAKE_DIR = os.environ.get("WAKE_DATADIR", "/opt/hyperdata/wakewatch")
 ASTER = "https://fapi.asterdex.com"
 LEGS = ((0.5, 0.30), (0.5, 1.00))      # (fraction of the position, take-profit level)
 HOLD_H = 72
+BE_STOP = 0.0                           # the second half's stop vs entry, once the +30% half has filled
 MAX_SIGNAL_AGE_MIN = 45                 # sweeps are hourly; anything older is a restart backlog
 MAX_CHASE = 0.05                        # skip if Aster's ask is > 5% above the signal's mark
 PAPER_FEE = 0.0004                      # Aster taker, per side (paper P&L)
@@ -462,6 +466,28 @@ class Trader:
                 self.warn_once(f"leg{sym}{i}{t['opened_ms']}", f"⚠️ wake live {sym}: could not place the "
                                f"+{leg['lv']:.0%} take-profit ({e}) — retrying every pass")
 
+    def _place_stop(self, sym, t, amt):
+        """After the +30% half: the rest gets a STOP_MARKET at entry (closePosition, on the mark). If the
+        mark is already at/below it, Aster would reject it (it would trigger at once): sell the rest now."""
+        tick, _, _ = self.ax.specs()[sym]
+        stop = floor_to(t["entry"] * (1 + BE_STOP), tick)
+        t["stop"] = t.get("stop") or {"oid": None, "filled": False, "px": float(stop)}
+        try:
+            r = self.ax.order(symbol=sym, side="SELL", type="STOP_MARKET", stopPrice=format(stop, "f"),
+                              closePosition="true", workingType=t.get("trigger", "MARK_PRICE"))
+            t["stop"]["oid"] = str(r["orderId"])
+            self.notify(f"🔒 wake LIVE {sym}: +30% half sold — stop on the rest moved to entry ({stop})")
+        except AsterError as e:
+            if str(e.code) == "-2021":                  # "order would immediately trigger": already below
+                self.ax.cancel_all(sym)
+                self.ax.order(symbol=sym, side="SELL", type="MARKET", quantity=format(abs(amt), "f"),
+                              reduceOnly="true")
+                t.update(status="closing", closing_ms=self.now_ms(), reason="stop at entry after +30%")
+                self.notify(f"🛑 wake LIVE {sym}: back under entry after the +30% half — sold the rest at market")
+            else:
+                self.warn_once(f"stop{sym}{t['opened_ms']}", f"⚠️ wake live {sym}: could not place the entry stop "
+                               f"({e}) — retrying every pass")
+
     # ---- managing open trades
     def _paper(self, st, sym, t, prem, now, force):
         if sym in prem:
@@ -469,17 +495,25 @@ class Trader:
             if t["next_fund"] and nxt > t["next_fund"]:          # a funding print passed: the long pays
                 t["funding"] -= t["left"] * t["notional"] * t["rate"]
             t.update(last=px, hi=max(t["hi"], px), rate=rate, next_fund=nxt)
+            stop = t["entry"] * (1 + BE_STOP)
+            if t.get("stop_armed") and t["left"] > 1e-9 and px <= stop:
+                t["realised"] += t["left"] * t["notional"] * (px / t["entry"] - 1)
+                t["left"] = 0.0
+                t["stopped"] = True
+                self.notify(f"🛑 wake paper {sym}: rest sold at the entry stop")
             for leg in t["legs"]:
                 if not leg["hit"] and t["left"] > 1e-9 and px >= t["entry"] * (1 + leg["lv"]):
                     leg["hit"] = True
                     f = min(leg["frac"], t["left"])
                     t["realised"] += f * t["notional"] * leg["lv"]
                     t["left"] -= f
+                    t["stop_armed"] = True                    # from the next mark on
                     self.notify(f"💰 wake paper {sym}: sold {f:.0%} at +{leg['lv']:.0%}")
         age_h = (now - t["opened_ms"]) / HOUR_MS
         if t["left"] <= 1e-9 or age_h >= HOLD_H or force:
             t["realised"] += t["left"] * t["notional"] * (t["last"] / t["entry"] - 1)
-            reason = "take-profits" if t["left"] <= 1e-9 else ("manual" if force and age_h < HOLD_H else "72h")
+            reason = ("stop at entry after +30%" if t.get("stopped") else "take-profits" if t["left"] <= 1e-9
+                      else ("manual" if force and age_h < HOLD_H else "72h"))
             fees = 2 * PAPER_FEE * t["notional"]
             self._record(st, sym, t, now, reason, t["last"], t["realised"], -fees, t["funding"])
 
@@ -502,9 +536,20 @@ class Trader:
                     self.notify(f"💰 wake LIVE {sym}: take-profit +{leg['lv']:.0%} filled @ {leg['px']:.6g}")
                 elif status not in ("NEW", "PARTIALLY_FILLED") and amt:
                     leg["oid"] = None                    # cancelled/expired while still holding: re-place
+        stp = t.get("stop")
+        if stp and stp.get("oid") and not stp.get("filled") and stp["oid"] not in oo:
+            r = self.ax.get_order(sym, oid=stp["oid"])
+            if (r or {}).get("status") == "FILLED":
+                stp.update(filled=True, px=float(r.get("avgPrice") or 0))
+                t["reason"] = "stop at entry after +30%"
+                self.notify(f"🛑 wake LIVE {sym}: rest sold at the entry stop @ {stp['px']:.6g}")
+            elif (r or {}).get("status") not in ("NEW", "PARTIALLY_FILLED") and amt:
+                stp["oid"] = None                        # cancelled/expired while still holding: re-place
         if amt is not None and amt != 0 and not force and (now - t["opened_ms"]) / HOUR_MS < HOLD_H:
             if any(not lg["filled"] and not lg["oid"] for lg in t["legs"]):
                 self._place_legs(sym, t)
+            if t["legs"][0]["filled"] and not (t.get("stop") or {}).get("oid"):
+                self._place_stop(sym, t, amt)
             return
         if t.get("status") == "closing" and amt:
             if now - t["closing_ms"] < 5 * 60_000:
@@ -610,7 +655,8 @@ def report(datadir):
         agg[2] += 1
         lines.append(f"• {sym} [{t['mode']}] {(now - t['opened_ms']) / HOUR_MS:.0f}h in, {e:.6g} → {last:.6g} "
                      f"({last / e - 1:+.0%}) · uPnL <b>${upnl:+.2f}</b>"
-                     + (f" · took {', '.join(hit)} (${banked:+.2f} banked)" if hit else ""))
+                     + (f" · took {', '.join(hit)} (${banked:+.2f} banked)" if hit else "")
+                     + (" · stop at entry" if (t.get("stop") or {}).get("oid") or t.get("stop_armed") else ""))
     if not trades:
         lines.append("no open trades")
     for mode, (u, b, n) in tot.items():
