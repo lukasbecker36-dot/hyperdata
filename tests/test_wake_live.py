@@ -327,7 +327,23 @@ def test_report_shows_unrealised_per_trade_and_total(setup):
     rep = wl.report(tr.dir)
     assert "PPPUSDT [paper]" in rep and "uPnL <b>$+10.00</b>" in rep
     assert "LLLUSDT [live]" in rep and "uPnL <b>$+10.00</b>" in rep and "$+17.50 banked" in rep   # 25 x 0.4, 25 x 0.7
-    assert "live unrealised: $+10.00</b> on 1 open" in rep and "paper unrealised: $+10.00</b> on 1 open" in rep
+    assert "live open: $+27.50 net</b> on 1 open = unrealised $+10.00 + banked $+17.50 + funding $+0.00 + fees $+0.00" in rep
+    assert "paper open: $+9.96 net</b>" in rep                   # less the $0.04 entry fee
+
+
+def test_report_includes_funding_and_fees_on_open_live_trades(setup):
+    tr, ax, clock, msgs, signal = setup
+    tr.step()
+    wl.save_settings(tr.dir, mode="live")
+    signal("LLLUSDT", 2.0)                          # live, 50 @ 2.0
+    tr.step()
+    ax.income_rows = [{"incomeType": "FUNDING_FEE", "income": "-1.25"}, {"incomeType": "COMMISSION", "income": "-0.04"}]
+    ax.marks["LLLUSDT"] = 2.2
+    clock.ms += H
+    tr.step()
+    rep = wl.report(tr.dir)
+    assert "uPnL <b>$+10.00</b>" in rep and "funding $-1.25, fees $-0.04 → net <b>$+8.71</b>" in rep
+    assert "live open: $+8.71 net</b>" in rep
 
 
 

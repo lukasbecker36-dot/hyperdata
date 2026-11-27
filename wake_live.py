@@ -55,6 +55,7 @@ MAX_SIGNAL_AGE_MIN = 45                 # sweeps are hourly; anything older is a
 MAX_CHASE = 0.05                        # skip if Aster's ask is > 5% above the signal's mark
 PAPER_FEE = 0.0004                      # Aster taker, per side (paper P&L)
 LOOP_S = 30
+COSTS_S = 600                           # open live trades: funding/fees re-read from Aster this often
 DEFAULTS = {"enabled": True, "mode": "paper", "size": 100.0, "lev": 2, "max_open": 10,
             "halt_loss": 250.0, "trigger": "MARK_PRICE"}
 TRADE_COLS = ["signal_ms", "symbol", "mode", "entry", "qty", "notional", "opened_ms", "closed_ms",
@@ -546,6 +547,7 @@ class Trader:
             elif (r or {}).get("status") not in ("NEW", "PARTIALLY_FILLED") and amt:
                 stp["oid"] = None                        # cancelled/expired while still holding: re-place
         if amt is not None and amt != 0 and not force and (now - t["opened_ms"]) / HOUR_MS < HOLD_H:
+            self._refresh_costs(sym, t, now)
             if any(not lg["filled"] and not lg["oid"] for lg in t["legs"]):
                 self._place_legs(sym, t)
             if t["legs"][0]["filled"] and not (t.get("stop") or {}).get("oid"):
@@ -578,6 +580,20 @@ class Trader:
         exit_px = t.get("exit_px") or next((lg.get("px") for lg in reversed(t["legs"]) if lg.get("px")), None) \
             or (prem.get(sym, (0,))[0])
         self._record(st, sym, t, now, t["reason"], exit_px, price, fees, funding)
+
+    def _refresh_costs(self, sym, t, now):
+        """Funding and commission paid so far on an open live trade (Aster income history), for /wl."""
+        if now - t.get("costs_ms", 0) < COSTS_S * 1000:
+            return
+        try:
+            inc = self.ax.income(sym, t["opened_ms"] - 60_000, now + 60_000)
+        except Exception as e:                          # display only: never block trading on it
+            log.warning(f"{sym} income read failed: {e}")
+            return
+        by = {}
+        for x in inc:
+            by[x.get("incomeType")] = by.get(x.get("incomeType"), 0.0) + float(x.get("income") or 0)
+        t.update(funding=by.get("FUNDING_FEE", 0.0), fees=by.get("COMMISSION", 0.0), costs_ms=now)
 
     def _record(self, st, sym, t, now, reason, exit_px, price, fees, funding):
         net = price + fees + funding
@@ -612,8 +628,18 @@ def totals_line(datadir, mode):
     if not rows:
         return f"{mode}: no closed trades yet"
     net = [float(r["net"]) for r in rows]
-    return (f"{mode}: {len(rows)} closed, ${sum(net):+,.2f} net, {sum(n > 0 for n in net)}/{len(rows)} won, "
-            f"best ${max(net):+.0f}, worst ${min(net):+.0f}")
+    fund = sum(float(r.get("funding") or 0) for r in rows)
+    fees = sum(float(r.get("fees") or 0) for r in rows)
+    return (f"{mode}: {len(rows)} closed, ${sum(net):+,.2f} net (after funding ${fund:+,.2f}, fees ${fees:+,.2f}), "
+            f"{sum(n > 0 for n in net)}/{len(rows)} won, best ${max(net):+.0f}, worst ${min(net):+.0f}")
+
+
+def trade_costs(t):
+    """(funding, fees) so far on an open trade, signed as P&L. Live: Aster's income history (re-read every
+    COSTS_S). Paper: funding tracked at each print, the entry fee."""
+    if t["mode"] == "paper":
+        return t.get("funding", 0.0), -PAPER_FEE * t.get("notional", 0.0)
+    return t.get("funding", 0.0), t.get("fees", 0.0)
 
 
 def trade_pnl(t):
@@ -640,7 +666,7 @@ def report(datadir):
              f"${float(cfg['size']):.0f} at {int(cfg['lev'])}x isolated · max {int(cfg['max_open'])} open · "
              f"brake -${float(cfg['halt_loss']):.0f}" + (f" · <b>BRAKE ON since {st['halted']}</b>" if st.get("halted") else "")]
     trades = (st.get("trades") or {})
-    tot = {"live": [0.0, 0.0, 0], "paper": [0.0, 0.0, 0]}
+    tot = {"live": [0.0, 0.0, 0, 0.0, 0.0], "paper": [0.0, 0.0, 0, 0.0, 0.0]}
     for sym, t in sorted(trades.items(), key=lambda kv: kv[1]["opened_ms"]):
         e = t.get("entry")
         if not e:
@@ -653,16 +679,21 @@ def report(datadir):
         agg[0] += upnl
         agg[1] += banked
         agg[2] += 1
+        fund, fees = trade_costs(t)
+        agg[3] += fund
+        agg[4] += fees
+        net = upnl + banked + fund + fees
         lines.append(f"• {sym} [{t['mode']}] {(now - t['opened_ms']) / HOUR_MS:.0f}h in, {e:.6g} → {last:.6g} "
                      f"({last / e - 1:+.0%}) · uPnL <b>${upnl:+.2f}</b>"
                      + (f" · took {', '.join(hit)} (${banked:+.2f} banked)" if hit else "")
-                     + (" · stop at entry" if (t.get("stop") or {}).get("oid") or t.get("stop_armed") else ""))
+                     + (" · stop at entry" if (t.get("stop") or {}).get("oid") or t.get("stop_armed") else "")
+                     + f" · funding ${fund:+.2f}, fees ${fees:+.2f} → net <b>${net:+.2f}</b>")
     if not trades:
         lines.append("no open trades")
-    for mode, (u, b, n) in tot.items():
+    for mode, (u, b, n, fu, fe) in tot.items():
         if n:
-            lines.append(f"<b>{mode} unrealised: ${u:+,.2f}</b> on {n} open"
-                         + (f" (${b:+,.2f} more banked by take-profits)" if b else "") + " · price only, before fees/funding")
+            lines.append(f"<b>{mode} open: ${u + b + fu + fe:+,.2f} net</b> on {n} open = unrealised ${u:+,.2f}"
+                         + (f" + banked ${b:+,.2f}" if b else "") + f" + funding ${fu:+,.2f} + fees ${fe:+,.2f}")
     if st.get("foreign"):
         lines.append(f"<i>positions on the Aster account not opened by this trader (never traded): "
                      f"{', '.join(st['foreign'])}</i>")
